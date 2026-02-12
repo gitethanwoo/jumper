@@ -12,6 +12,10 @@ node_modules/
 dist/
 **/dist/
 web-build/
+coverage/
+.cache/
+.tmp/
+tmp/
 
 # Expo generated
 expo-env.d.ts
@@ -29,12 +33,18 @@ apps/mobile/android/
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+*.log
 
 # Env
 .env*.local
 
 # TS
 *.tsbuildinfo
+
+# Xcode user-local metadata
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
 
 # Backup of previous nested repo metadata
 .mobile-git-backup-*/
