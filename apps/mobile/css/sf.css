@@ -1,0 +1,40 @@
+@layer base {
+  html {
+    color-scheme: light;
+  }
+}
+
+:root {
+  --sf-amber: rgb(180 83 9);
+  --sf-teal: rgb(13 148 136);
+  --sf-red: rgb(220 38 38);
+
+  --sf-text: rgb(28 25 23);
+  --sf-text-2: rgb(120 113 108);
+  --sf-text-3: rgb(168 162 158);
+
+  --sf-bg: rgb(250 250 249);
+  --sf-bg-2: rgb(240 237 233);
+  --sf-bg-3: rgb(228 225 220);
+
+  --sf-sep: rgb(0 0 0 / 0.07);
+}
+
+/* Register as Tailwind theme colors */
+@layer theme {
+  @theme {
+    --color-sf-amber: var(--sf-amber);
+    --color-sf-teal: var(--sf-teal);
+    --color-sf-red: var(--sf-red);
+
+    --color-sf-text: var(--sf-text);
+    --color-sf-text-2: var(--sf-text-2);
+    --color-sf-text-3: var(--sf-text-3);
+
+    --color-sf-bg: var(--sf-bg);
+    --color-sf-bg-2: var(--sf-bg-2);
+    --color-sf-bg-3: var(--sf-bg-3);
+
+    --color-sf-sep: var(--sf-sep);
+  }
+}

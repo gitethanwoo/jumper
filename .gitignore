@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Local tooling / caches
+.expo/
+**/.expo/
+.claude/
+.codex/
+
+# Build outputs
+dist/
+**/dist/
+web-build/
+
+# Expo generated
+expo-env.d.ts
+**/expo-env.d.ts
+
+# Native generated folders (Expo prebuild)
+apps/mobile/ios/
+apps/mobile/android/
+
+# OS/editor noise
+.DS_Store
+*.orig.*
+
+# Logs / temp
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Env
+.env*.local
+
+# TS
+*.tsbuildinfo
+
+# Backup of previous nested repo metadata
+.mobile-git-backup-*/

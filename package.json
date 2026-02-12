@@ -1,0 +1,14 @@
+{
+  "name": "cc-bridge",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "dev:mobile": "pnpm -C apps/mobile start",
+    "dev:mobile:client": "pnpm -C apps/mobile start -- --dev-client",
+    "run:ios": "pnpm -C apps/mobile exec expo run:ios",
+    "dev:server": "pnpm -C apps/bridge-server dev"
+  },
+  "dependencies": {
+    "@bacons/apple-targets": "^4.0.2"
+  }
+}
