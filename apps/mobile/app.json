@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "Jumper",
+    "slug": "jumper",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "mobile",
+    "icon": "./assets/images/jumped-icon-no-bg.png",
+    "scheme": "jumper",
     "userInterfaceStyle": "automatic",
     "splash": {
       "image": "./assets/images/splash-icon.png",
@@ -17,16 +17,22 @@
       "appleTeamId": "NSJPQ3TSBT",
       "entitlements": {
         "com.apple.security.application-groups": [
+          "group.com.ethanwoo.ccbridge",
           "group.com.ethanwoo.ccbridge"
         ]
       },
-      "supportsTablet": true
+      "icon": "./assets/app-icon.icon",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.ethanwoo.ccbridge",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "foregroundImage": "./assets/images/android-icon.png",
+        "backgroundImage": "./assets/images/android-icon.png",
+        "monochromeImage": "./assets/images/android-icon.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -47,13 +53,37 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow cc-bridge to select images to send to Claude."
+          "photosPermission": "Allow Jumper to select images to send to Claude."
         }
       ],
       "@bacons/apple-targets"
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "bundleIdentifier": "com.ethanwoo.ccbridge.keyboard",
+                  "targetName": "keyboard",
+                  "entitlements": {
+                    "com.apple.security.application-groups": [
+                      "group.com.ethanwoo.ccbridge"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "projectId": "0ce5bbcc-76ea-4406-8784-5e3a6d1f0e11"
+      }
+    },
+    "owner": "athanir"
   }
 }
