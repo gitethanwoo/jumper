@@ -1,6 +1,6 @@
 # cc-bridge
 
-Expo iOS app (Expo SDK 55 preview) that acts as a UI bridge to a local Mac server. The server runs `claude` in headless JSON streaming mode and forwards events over WebSocket.
+cc-bridge is a mobile client for Claude Code. It pairs a local Node.js bridge server — which spawns the `claude` CLI in headless JSON-streaming mode — with an Expo/React Native iOS app that connects over WebSocket, letting you chat with Claude about any project folder on your Mac from your phone. You create projects by pointing at a local directory, start conversations within them, and get real-time streamed responses with full tool-run visibility, markdown rendering, and image attachments, all routed through `ws://your-mac:8787/ws`.
 
 ## Run The Bridge Server
 
