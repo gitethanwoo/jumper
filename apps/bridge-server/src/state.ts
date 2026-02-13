@@ -16,9 +16,15 @@ type PersistedState = {
   chats: Chat[];
 };
 
+export type RelaySession = {
+  sessionId: string;
+  sessionToken: string;
+};
+
 const STATE_DIR = path.join(os.homedir(), ".cc-bridge");
 const TOKENS_PATH = path.join(STATE_DIR, "tokens.json");
 const STATE_PATH = path.join(STATE_DIR, "state.json");
+const RELAY_SESSION_PATH = path.join(STATE_DIR, "relay-session.json");
 
 async function ensureStateDir() {
   await fs.mkdir(STATE_DIR, { recursive: true });
@@ -54,6 +60,33 @@ export async function loadState(): Promise<PersistedState> {
 export async function saveState(state: PersistedState): Promise<void> {
   await ensureStateDir();
   await fs.writeFile(STATE_PATH, JSON.stringify(state, null, 2) + "\n", "utf8");
+}
+
+export async function loadRelaySession(): Promise<RelaySession | null> {
+  await ensureStateDir();
+  if (!existsSync(RELAY_SESSION_PATH)) return null;
+  const raw = await fs.readFile(RELAY_SESSION_PATH, "utf8");
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("relay-session.json must be an object");
+  }
+
+  const maybe = parsed as { sessionId?: unknown; sessionToken?: unknown };
+  if (typeof maybe.sessionId !== "string" || typeof maybe.sessionToken !== "string") {
+    throw new Error("relay-session.json must include sessionId and sessionToken");
+  }
+  return { sessionId: maybe.sessionId, sessionToken: maybe.sessionToken };
+}
+
+export async function saveRelaySession(session: RelaySession): Promise<void> {
+  await ensureStateDir();
+  await fs.writeFile(RELAY_SESSION_PATH, JSON.stringify(session, null, 2) + "\n", "utf8");
+}
+
+export async function clearRelaySession(): Promise<void> {
+  await ensureStateDir();
+  if (!existsSync(RELAY_SESSION_PATH)) return;
+  await fs.rm(RELAY_SESSION_PATH);
 }
 
 export function nowIso(): string {

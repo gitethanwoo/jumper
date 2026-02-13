@@ -10,6 +10,8 @@ import readline from "node:readline";
 import QRCode from "qrcode";
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { RelayClient } from "./relay-client.js";
+import { loadRelaySession, nowIso, loadState, saveRelaySession, saveState } from "./state.js";
 import type {
   ChatAttachment,
   ClientToServer,
@@ -19,12 +21,12 @@ import type {
   KeyboardRespondSuccess,
   ServerToClient,
 } from "./types.js";
-import { nowIso, loadState, saveState } from "./state.js";
 
 type State = Awaited<ReturnType<typeof loadState>>;
 
 const PORT = Number(process.env.PORT ?? "8787");
 const HOST = process.env.HOST ?? "0.0.0.0";
+const RELAY_URL = process.env.RELAY_URL;
 const PROJECTS_ROOT =
   process.env.PROJECTS_ROOT ?? path.join(os.homedir(), "dev", "cc-bridge-projects");
 
@@ -213,13 +215,17 @@ function send(ws: WebSocket, msg: ServerToClient): void {
   ws.send(JSON.stringify(msg));
 }
 
+function parseMessagePayload(payload: unknown): ClientToServer {
+  if (!payload || typeof payload !== "object") throw new Error("Message must be an object");
+  const t = (payload as { type?: unknown }).type;
+  if (typeof t !== "string") throw new Error("Message missing type");
+  return payload as ClientToServer;
+}
+
 function parseMessage(data: WebSocket.RawData): ClientToServer {
   const text = typeof data === "string" ? data : data.toString("utf8");
   const parsed: unknown = JSON.parse(text);
-  if (!parsed || typeof parsed !== "object") throw new Error("Message must be an object");
-  const t = (parsed as { type?: unknown }).type;
-  if (typeof t !== "string") throw new Error("Message missing type");
-  return parsed as ClientToServer;
+  return parseMessagePayload(parsed);
 }
 
 function jsonResponse(res: http.ServerResponse, statusCode: number, value: unknown): void {
@@ -234,6 +240,25 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   }
   const text = Buffer.concat(chunks).toString("utf8");
   return JSON.parse(text);
+}
+
+function parseUploadImageBody(payload: unknown): UploadImageBody | null {
+  if (!isObject(payload)) return null;
+  if (
+    typeof payload.chatId !== "string" ||
+    typeof payload.fileName !== "string" ||
+    typeof payload.mimeType !== "string" ||
+    typeof payload.base64 !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    chatId: payload.chatId,
+    fileName: payload.fileName,
+    mimeType: payload.mimeType,
+    base64: payload.base64,
+  };
 }
 
 function clampText(value: string, maxLength: number): string {
@@ -504,6 +529,39 @@ function fileExtension(fileName: string, mimeType: string): string {
   return ".jpg";
 }
 
+async function uploadImage(state: State, body: UploadImageBody): Promise<ChatAttachment> {
+  const chat = state.chats.find((entry) => entry.id === body.chatId);
+  if (!chat) {
+    throw new Error("Unknown chat");
+  }
+
+  const project = state.projects.find((entry) => entry.id === chat.projectId);
+  if (!project) {
+    throw new Error("Unknown project");
+  }
+
+  const projectPath = normalizeProjectPath(project.path);
+  const relativeDirFs = path.join(".claude", "tmp", chat.id);
+  const relativeDir = relativeDirFs.split(path.sep).join("/");
+  const id = crypto.randomUUID();
+  const ext = fileExtension(body.fileName, body.mimeType);
+  const storedFileName = `${id}${ext}`;
+  const relativePath = `${relativeDir}/${storedFileName}`;
+  const absoluteDir = path.join(projectPath, relativeDirFs);
+  const absolutePath = path.join(projectPath, relativePath);
+  const bytes = Buffer.from(body.base64, "base64");
+  await fs.mkdir(absoluteDir, { recursive: true });
+  await fs.writeFile(absolutePath, bytes);
+
+  return {
+    id,
+    name: body.fileName,
+    mimeType: body.mimeType,
+    relativePath,
+    sizeBytes: bytes.byteLength,
+  };
+}
+
 function buildClaudePrompt(text: string, attachments: ChatAttachment[], projectPath: string): string {
   if (attachments.length === 0) return text;
 
@@ -554,6 +612,161 @@ async function main() {
 
   let state: State = await loadState();
   state = await normalizeStateProjectPaths(state);
+
+  const handleClientMessage = async (
+    msg: ClientToServer,
+    reply: (message: ServerToClient) => void
+  ): Promise<void> => {
+    if (msg.type === "projects.list") {
+      reply({ type: "projects.list.result", projects: state.projects });
+      return;
+    }
+
+    if (msg.type === "projects.create") {
+      const projectPath = msg.path
+        ? normalizeProjectPath(msg.path)
+        : path.resolve(path.join(PROJECTS_ROOT, slugify(msg.name)));
+      await fs.mkdir(projectPath, { recursive: true });
+
+      const project = { id: crypto.randomUUID(), name: msg.name, path: projectPath, createdAt: nowIso() };
+      state = { ...state, projects: [...state.projects, project] };
+      await saveState(state);
+
+      reply({ type: "projects.create.result", project });
+      return;
+    }
+
+    if (msg.type === "chats.list") {
+      const chats = msg.projectId ? state.chats.filter((c) => c.projectId === msg.projectId) : state.chats;
+      reply({ type: "chats.list.result", chats });
+      return;
+    }
+
+    if (msg.type === "chats.create") {
+      const project = state.projects.find((p) => p.id === msg.projectId);
+      if (!project) throw new Error("Unknown project");
+
+      const chat = {
+        id: crypto.randomUUID(),
+        projectId: msg.projectId,
+        title: msg.title,
+        sessionId: null,
+        createdAt: nowIso(),
+      };
+      state = { ...state, chats: [...state.chats, chat] };
+      await saveState(state);
+
+      reply({ type: "chats.create.result", chat });
+      return;
+    }
+
+    if (msg.type === "chats.history") {
+      const chat = state.chats.find((c) => c.id === msg.chatId);
+      if (!chat) throw new Error("Unknown chat");
+
+      if (!chat.sessionId) {
+        reply({ type: "chats.history.result", chatId: chat.id, messages: [], events: [] });
+        return;
+      }
+
+      const project = state.projects.find((p) => p.id === chat.projectId);
+      if (!project) throw new Error("Unknown project");
+
+      const projectPath = normalizeProjectPath(project.path);
+      const history = await loadClaudeHistory(projectPath, chat.sessionId);
+      reply({
+        type: "chats.history.result",
+        chatId: chat.id,
+        messages: history.messages,
+        events: history.events,
+      });
+      return;
+    }
+
+    if (msg.type === "chats.cancel") {
+      const child = active.get(msg.chatId);
+      if (child) child.kill("SIGINT");
+      return;
+    }
+
+    if (msg.type === "upload-image") {
+      const attachment = await uploadImage(state, msg);
+      reply({ type: "upload-image.result", attachment });
+      return;
+    }
+
+    if (msg.type === "chats.send") {
+      const chat = state.chats.find((c) => c.id === msg.chatId);
+      if (!chat) throw new Error("Unknown chat");
+
+      if (active.has(chat.id)) throw new Error("Chat is busy");
+
+      const project = state.projects.find((p) => p.id === chat.projectId);
+      if (!project) throw new Error("Unknown project");
+      const projectPath = normalizeProjectPath(project.path);
+      const prompt = buildClaudePrompt(msg.text, msg.attachments ?? [], projectPath);
+
+      const args: string[] = [];
+      if (chat.sessionId) args.push("-r", chat.sessionId);
+      args.push(
+        "-p",
+        prompt,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--permission-mode",
+        "bypassPermissions",
+        "--tools",
+        "default",
+      );
+
+      const child = spawn("claude", args, {
+        cwd: projectPath,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: process.env,
+      });
+      active.set(chat.id, child);
+
+      const onLine = async (line: string) => {
+        if (!line.trim()) return;
+        const event: unknown = JSON.parse(line);
+        reply({ type: "claude.event", chatId: chat.id, event });
+
+        const maybe = event as { type?: unknown; subtype?: unknown; session_id?: unknown };
+        if (maybe.type === "system" && maybe.subtype === "init" && typeof maybe.session_id === "string") {
+          const idx = state.chats.findIndex((c) => c.id === chat.id);
+          if (idx === -1) return;
+          const existing = state.chats[idx];
+          if (!existing) return;
+          const updated = { ...existing, sessionId: maybe.session_id };
+          state = {
+            ...state,
+            chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],
+          };
+          await saveState(state);
+        }
+      };
+
+      const rlOut = readline.createInterface({ input: child.stdout });
+      rlOut.on("line", (line) => void onLine(line));
+
+      const rlErr = readline.createInterface({ input: child.stderr });
+      rlErr.on("line", (line) => reply({ type: "claude.event", chatId: chat.id, event: { type: "stderr", line } }));
+
+      child.on("exit", (exitCode, signal) => {
+        active.delete(chat.id);
+        rlOut.close();
+        rlErr.close();
+        reply({ type: "claude.done", chatId: chat.id, exitCode, signal });
+      });
+
+      return;
+    }
+
+    const unreachable: never = msg;
+    throw new Error(`Unhandled message: ${(unreachable as { type: string }).type}`);
+  };
 
   const httpServer = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -740,15 +953,8 @@ async function main() {
 
     if (req.method === "POST" && requestUrl.pathname === "/upload-image") {
       const payload = await readJsonBody(req);
-      if (!isObject(payload)) throw new Error("upload-image body must be an object");
-
-      const body = payload as Partial<UploadImageBody>;
-      if (
-        typeof body.chatId !== "string" ||
-        typeof body.fileName !== "string" ||
-        typeof body.mimeType !== "string" ||
-        typeof body.base64 !== "string"
-      ) {
+      const body = parseUploadImageBody(payload);
+      if (!body) {
         jsonResponse(res, 400, { error: "Invalid upload-image payload" });
         return;
       }
@@ -764,26 +970,7 @@ async function main() {
         return;
       }
 
-      const projectPath = normalizeProjectPath(project.path);
-      const relativeDirFs = path.join(".claude", "tmp", chat.id);
-      const relativeDir = relativeDirFs.split(path.sep).join("/");
-      const id = crypto.randomUUID();
-      const ext = fileExtension(body.fileName, body.mimeType);
-      const storedFileName = `${id}${ext}`;
-      const relativePath = `${relativeDir}/${storedFileName}`;
-      const absoluteDir = path.join(projectPath, relativeDirFs);
-      const absolutePath = path.join(projectPath, relativePath);
-      const bytes = Buffer.from(body.base64, "base64");
-      await fs.mkdir(absoluteDir, { recursive: true });
-      await fs.writeFile(absolutePath, bytes);
-
-      const attachment: ChatAttachment = {
-        id,
-        name: body.fileName,
-        mimeType: body.mimeType,
-        relativePath,
-        sizeBytes: bytes.byteLength,
-      };
+      const attachment = await uploadImage(state, body);
       jsonResponse(res, 200, { attachment });
       return;
     }
@@ -831,154 +1018,48 @@ async function main() {
   wss.on("connection", (ws) => {
     ws.on("message", async (data) => {
       const msg = parseMessage(data);
-
-      if (msg.type === "projects.list") {
-        send(ws, { type: "projects.list.result", projects: state.projects });
-        return;
-      }
-
-      if (msg.type === "projects.create") {
-        const projectPath = msg.path
-          ? normalizeProjectPath(msg.path)
-          : path.resolve(path.join(PROJECTS_ROOT, slugify(msg.name)));
-        await fs.mkdir(projectPath, { recursive: true });
-
-        const project = { id: crypto.randomUUID(), name: msg.name, path: projectPath, createdAt: nowIso() };
-        state = { ...state, projects: [...state.projects, project] };
-        await saveState(state);
-
-        send(ws, { type: "projects.create.result", project });
-        return;
-      }
-
-      if (msg.type === "chats.list") {
-        const chats = msg.projectId
-          ? state.chats.filter((c) => c.projectId === msg.projectId)
-          : state.chats;
-        send(ws, { type: "chats.list.result", chats });
-        return;
-      }
-
-      if (msg.type === "chats.create") {
-        const project = state.projects.find((p) => p.id === msg.projectId);
-        if (!project) throw new Error("Unknown project");
-
-        const chat = {
-          id: crypto.randomUUID(),
-          projectId: msg.projectId,
-          title: msg.title,
-          sessionId: null,
-          createdAt: nowIso(),
-        };
-        state = { ...state, chats: [...state.chats, chat] };
-        await saveState(state);
-
-        send(ws, { type: "chats.create.result", chat });
-        return;
-      }
-
-      if (msg.type === "chats.history") {
-        const chat = state.chats.find((c) => c.id === msg.chatId);
-        if (!chat) throw new Error("Unknown chat");
-
-        if (!chat.sessionId) {
-          send(ws, { type: "chats.history.result", chatId: chat.id, messages: [], events: [] });
-          return;
-        }
-
-        const project = state.projects.find((p) => p.id === chat.projectId);
-        if (!project) throw new Error("Unknown project");
-
-        const projectPath = normalizeProjectPath(project.path);
-        const history = await loadClaudeHistory(projectPath, chat.sessionId);
-        send(ws, {
-          type: "chats.history.result",
-          chatId: chat.id,
-          messages: history.messages,
-          events: history.events,
-        });
-        return;
-      }
-
-      if (msg.type === "chats.cancel") {
-        const child = active.get(msg.chatId);
-        if (child) child.kill("SIGINT");
-        return;
-      }
-
-      if (msg.type === "chats.send") {
-        const chat = state.chats.find((c) => c.id === msg.chatId);
-        if (!chat) throw new Error("Unknown chat");
-
-        if (active.has(chat.id)) throw new Error("Chat is busy");
-
-        const project = state.projects.find((p) => p.id === chat.projectId);
-        if (!project) throw new Error("Unknown project");
-        const projectPath = normalizeProjectPath(project.path);
-        const prompt = buildClaudePrompt(msg.text, msg.attachments ?? [], projectPath);
-
-        const args: string[] = [];
-        if (chat.sessionId) args.push("-r", chat.sessionId);
-        args.push(
-          "-p",
-          prompt,
-          "--output-format",
-          "stream-json",
-          "--verbose",
-          "--include-partial-messages",
-          "--permission-mode",
-          "bypassPermissions",
-          "--tools",
-          "default",
-        );
-
-        const child = spawn("claude", args, {
-          cwd: projectPath,
-          stdio: ["ignore", "pipe", "pipe"],
-          env: process.env,
-        });
-        active.set(chat.id, child);
-
-        const onLine = async (line: string) => {
-          if (!line.trim()) return;
-          const event: unknown = JSON.parse(line);
-          send(ws, { type: "claude.event", chatId: chat.id, event });
-
-          const maybe = event as { type?: unknown; subtype?: unknown; session_id?: unknown };
-          if (maybe.type === "system" && maybe.subtype === "init" && typeof maybe.session_id === "string") {
-            const idx = state.chats.findIndex((c) => c.id === chat.id);
-            if (idx === -1) return;
-            const existing = state.chats[idx];
-            if (!existing) return;
-            const updated = { ...existing, sessionId: maybe.session_id };
-            state = {
-              ...state,
-              chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],
-            };
-            await saveState(state);
-          }
-        };
-
-        const rlOut = readline.createInterface({ input: child.stdout });
-        rlOut.on("line", (line) => void onLine(line));
-
-        const rlErr = readline.createInterface({ input: child.stderr });
-        rlErr.on("line", (line) => send(ws, { type: "claude.event", chatId: chat.id, event: { type: "stderr", line } }));
-
-        child.on("exit", (exitCode, signal) => {
-          active.delete(chat.id);
-          rlOut.close();
-          rlErr.close();
-          send(ws, { type: "claude.done", chatId: chat.id, exitCode, signal });
-        });
-
-        return;
-      }
-
-      const unreachable: never = msg;
-      throw new Error(`Unhandled message: ${(unreachable as { type: string }).type}`);
+      await handleClientMessage(msg, (message) => send(ws, message));
     });
   });
+
+  if (RELAY_URL) {
+    const relaySession = await loadRelaySession();
+    const relayClient = new RelayClient({
+      relayUrl: RELAY_URL,
+      session: relaySession,
+      onPairingCode: (message) => {
+        console.log(`[cc-bridge] relay code: ${message.code}`);
+        console.log("[cc-bridge] Enter this code in the mobile app to connect.");
+      },
+      onPaired: async (session) => {
+        await saveRelaySession(session);
+        console.log(`[cc-bridge] relay paired: session ${session.sessionId}`);
+      },
+      onPayload: async (payload) => {
+        const msg = parseMessagePayload(payload);
+        await handleClientMessage(msg, (message) => relayClient.send(JSON.stringify(message)));
+      },
+      onControlMessage: (message) => {
+        if (message.type === "relay.peer_connected") {
+          console.log(`[cc-bridge] relay peer connected: ${message.peer}`);
+          return;
+        }
+        if (message.type === "relay.peer_disconnected") {
+          console.log(`[cc-bridge] relay peer disconnected: ${message.peer}`);
+          return;
+        }
+        if (message.type === "relay.reconnected") {
+          console.log(`[cc-bridge] relay reconnected: ${message.role}`);
+          return;
+        }
+        if (message.type === "relay.error") {
+          console.log(`[cc-bridge] relay error: ${message.message}`);
+        }
+      },
+    });
+    relayClient.connect();
+    console.log(`[cc-bridge] relay: ${RELAY_URL}`);
+  }
 
   httpServer.listen(PORT, HOST);
 }

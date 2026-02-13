@@ -107,6 +107,11 @@ export type ClaudeDone = {
   signal: NodeJS.Signals | null;
 };
 
+export type UploadImageResult = {
+  type: "upload-image.result";
+  attachment: ChatAttachment;
+};
+
 export type ServerToClient =
   | ProjectsListResult
   | ProjectsCreateResult
@@ -115,6 +120,7 @@ export type ServerToClient =
   | ChatsHistoryResult
   | ClaudeEvent
   | ClaudeDone
+  | UploadImageResult
   | ErrorMessage;
 
 export type ProjectsListMessage = { type: "projects.list" };
@@ -133,6 +139,13 @@ export type ChatsSendMessage = {
   attachments?: ChatAttachment[];
 };
 export type ChatsCancelMessage = { type: "chats.cancel"; chatId: string };
+export type UploadImageMessage = {
+  type: "upload-image";
+  chatId: string;
+  fileName: string;
+  mimeType: string;
+  base64: string;
+};
 
 export type ClientToServer =
   | ProjectsListMessage
@@ -141,4 +154,5 @@ export type ClientToServer =
   | ChatsCreateMessage
   | ChatsHistoryMessage
   | ChatsSendMessage
-  | ChatsCancelMessage;
+  | ChatsCancelMessage
+  | UploadImageMessage;
