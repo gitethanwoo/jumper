@@ -2,11 +2,9 @@ import UIKit
 
 private let appGroupSuite = "group.com.ethanwoo.ccbridge"
 private let bridgeServerURLKey = "bridge_server_url"
-private let bridgeTokenKey = "bridge_token"
 
 private struct SharedBridgeConfig {
     let serverURL: String
-    let token: String
 }
 
 private struct KeyboardConversationEntryPayload: Codable {
@@ -69,6 +67,222 @@ private struct KeyDefinition {
     let widthMultiplier: CGFloat
 }
 
+// MARK: - RotatingGlowBorder
+
+private final class RotatingGlowBorder: UIView {
+
+    private let containerLayer = CALayer()
+    private let gradientLayer = CAGradientLayer()
+    private let borderMask = CAShapeLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+
+        // Container holds the gradient and is masked to the border ring
+        borderMask.fillRule = .evenOdd
+        containerLayer.mask = borderMask
+        containerLayer.addSublayer(gradientLayer)
+        layer.addSublayer(containerLayer)
+
+        // Conic gradient for the rotating light
+        gradientLayer.type = .conic
+        gradientLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradientLayer.endPoint = CGPoint(x: 0.5, y: 0)
+
+        // Glow shadow on the view layer (not clipped by the mask)
+        layer.shadowOffset = .zero
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func updateAppearance(bright: UIColor) {
+        gradientLayer.colors = [
+            bright.withAlphaComponent(0.9).cgColor,
+            bright.withAlphaComponent(0.35).cgColor,
+            bright.withAlphaComponent(0.0).cgColor,
+            bright.withAlphaComponent(0.0).cgColor,
+            bright.withAlphaComponent(0.35).cgColor,
+            bright.withAlphaComponent(0.9).cgColor,
+        ]
+        gradientLayer.locations = [0, 0.1, 0.25, 0.75, 0.9, 1.0]
+        layer.shadowColor = bright.cgColor
+        layer.shadowRadius = 8
+        layer.shadowOpacity = 0.3
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            ensureAnimating()
+        }
+    }
+
+    private func ensureAnimating() {
+        guard gradientLayer.animation(forKey: "rotate") == nil else { return }
+        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+        rotation.fromValue = 0
+        rotation.toValue = CGFloat.pi * 2
+        rotation.duration = 3.0
+        rotation.repeatCount = .infinity
+        rotation.isRemovedOnCompletion = false
+        gradientLayer.add(rotation, forKey: "rotate")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        let cornerRadius: CGFloat = 12
+        let borderWidth: CGFloat = 1.5
+
+        containerLayer.frame = bounds
+
+        // Gradient: square, diagonal-sized, centered so rotation never exposes gaps
+        let diag = sqrt(bounds.width * bounds.width + bounds.height * bounds.height)
+        gradientLayer.bounds = CGRect(x: 0, y: 0, width: diag, height: diag)
+        gradientLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+
+        // Border ring mask: outer rounded rect minus inner rounded rect
+        let outer = UIBezierPath(roundedRect: bounds, cornerRadius: cornerRadius)
+        let inner = UIBezierPath(
+            roundedRect: bounds.insetBy(dx: borderWidth, dy: borderWidth),
+            cornerRadius: cornerRadius - borderWidth
+        )
+        outer.append(inner.reversing())
+        borderMask.path = outer.cgPath
+
+        // Shadow path for the glow
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: cornerRadius).cgPath
+    }
+}
+
+// MARK: - KeyPreviewView
+
+private final class KeyPreviewView: UIView {
+
+    private let shapeLayer = CAShapeLayer()
+    private let characterLabel = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isHidden = true
+        isUserInteractionEnabled = false
+
+        shapeLayer.fillColor = UIColor.white.cgColor
+        shapeLayer.shadowColor = UIColor.black.cgColor
+        shapeLayer.shadowOpacity = 0.3
+        shapeLayer.shadowOffset = CGSize(width: 0, height: 1)
+        shapeLayer.shadowRadius = 1
+        layer.addSublayer(shapeLayer)
+
+        characterLabel.font = UIFont.systemFont(ofSize: 36, weight: .light)
+        characterLabel.textColor = .label
+        characterLabel.textAlignment = .center
+        addSubview(characterLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func show(for button: UIButton, character: String, in coordinateView: UIView) {
+        guard let superview else { return }
+        let keyRect = button.convert(button.bounds, to: superview)
+
+        let balloonWidth = keyRect.width + 24
+        let balloonHeight: CGFloat = 62
+        let taperHeight: CGFloat = 12
+        let cornerRadius: CGFloat = 8
+
+        let totalWidth = balloonWidth
+        let totalHeight = balloonHeight + taperHeight
+
+        let balloonLeft = keyRect.midX - balloonWidth / 2
+        let balloonTop = keyRect.minY - balloonHeight - taperHeight
+
+        frame = CGRect(x: balloonLeft, y: balloonTop, width: totalWidth, height: totalHeight)
+        shapeLayer.frame = bounds
+
+        // Build path in local coordinates
+        let path = UIBezierPath()
+
+        // Bottom-left of taper (aligned with key left edge)
+        let taperLeftX = keyRect.minX - balloonLeft
+        let taperRightX = keyRect.maxX - balloonLeft
+        let taperBottomY = totalHeight
+        let balloonBottomY = balloonHeight
+
+        // Start at bottom-left of taper (key top-left)
+        path.move(to: CGPoint(x: taperLeftX, y: taperBottomY))
+
+        // Quad curve up-left to balloon bottom-left
+        path.addQuadCurve(
+            to: CGPoint(x: 0, y: balloonBottomY),
+            controlPoint: CGPoint(x: taperLeftX, y: balloonBottomY)
+        )
+
+        // Left side up to top-left corner
+        path.addLine(to: CGPoint(x: 0, y: cornerRadius))
+
+        // Top-left corner
+        path.addArc(
+            withCenter: CGPoint(x: cornerRadius, y: cornerRadius),
+            radius: cornerRadius, startAngle: .pi, endAngle: .pi * 1.5, clockwise: true
+        )
+
+        // Top side
+        path.addLine(to: CGPoint(x: totalWidth - cornerRadius, y: 0))
+
+        // Top-right corner
+        path.addArc(
+            withCenter: CGPoint(x: totalWidth - cornerRadius, y: cornerRadius),
+            radius: cornerRadius, startAngle: .pi * 1.5, endAngle: 0, clockwise: true
+        )
+
+        // Right side down to balloon bottom-right
+        path.addLine(to: CGPoint(x: totalWidth, y: balloonBottomY))
+
+        // Quad curve down-right to taper bottom-right (key top-right)
+        path.addQuadCurve(
+            to: CGPoint(x: taperRightX, y: taperBottomY),
+            controlPoint: CGPoint(x: taperRightX, y: balloonBottomY)
+        )
+
+        path.close()
+
+        shapeLayer.path = path.cgPath
+
+        // Center label in balloon area
+        characterLabel.text = character
+        characterLabel.frame = CGRect(x: 0, y: 0, width: totalWidth, height: balloonHeight)
+
+        isHidden = false
+    }
+
+    func hide() {
+        isHidden = true
+    }
+
+    func updateAppearance(fillColor: UIColor, shadowOpacity: Float) {
+        // Lighten the fill slightly so the preview stands out from the key
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        fillColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let lift: CGFloat = 0.12
+        let lighter = UIColor(
+            red: min(r + (1 - r) * lift, 1),
+            green: min(g + (1 - g) * lift, 1),
+            blue: min(b + (1 - b) * lift, 1),
+            alpha: a
+        )
+        shapeLayer.fillColor = lighter.cgColor
+        shapeLayer.shadowOpacity = shadowOpacity
+        characterLabel.textColor = .label
+    }
+}
+
 // MARK: - KeyboardViewController
 
 final class KeyboardViewController: UIInputViewController {
@@ -80,6 +294,7 @@ final class KeyboardViewController: UIInputViewController {
     private var latestReply = ""
     private var latestResultText = ""
     private var latestConversationContext: AnyObject?
+    private var debugLog: [String] = []
     private var keyboardHeightConstraint: NSLayoutConstraint?
 
     private var currentMode: KeyboardMode = .input {
@@ -90,8 +305,6 @@ final class KeyboardViewController: UIInputViewController {
         didSet {
             promptField.text = promptText.isEmpty ? nil : promptText
             updatePromptPlaceholderVisibility()
-            sendButton.isEnabled = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            sendButton.alpha = sendButton.isEnabled ? 1.0 : 0.4
             updateRow3SendButtonState()
         }
     }
@@ -101,13 +314,14 @@ final class KeyboardViewController: UIInputViewController {
     private var isNumberMode: Bool = false
     private var lastShiftTapTime: Date?
     private var backspaceTimer: Timer?
+    private var backspaceDeleteCount: Int = 0
     private var keyMap: [UIButton: KeyDefinition] = [:]
 
     // MARK: UI References
 
     private let promptField = UITextField()
-    private let sendButton = UIButton(type: .system)
     private let promptRow = UIStackView()
+    private let promptGlow = RotatingGlowBorder()
     private let keyboardContainer = UIStackView()
     private let resultContainer = UIStackView()
     private let resultActionRow = UIStackView()
@@ -118,15 +332,19 @@ final class KeyboardViewController: UIInputViewController {
     private let newPromptButton = UIButton(type: .system)
     private let resultInsertButton = UIButton(type: .system)
 
-    private var globeKeyInRow3: UIButton?
     private var shiftKeyButton: UIButton?
     private var row3SendButton: UIButton?
+
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+    private lazy var keyPreview = KeyPreviewView()
 
     // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        debugLog.append("viewDidLoad")
         Self.nameFormatter.style = .default
+        haptic.prepare()
         configureHierarchy()
         applyAppearance()
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
@@ -137,7 +355,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func updateViewConstraints() {
         if keyboardHeightConstraint == nil {
-            let constraint = view.heightAnchor.constraint(equalToConstant: 290)
+            let constraint = view.heightAnchor.constraint(equalToConstant: 280)
             constraint.priority = .defaultHigh
             constraint.isActive = true
             keyboardHeightConstraint = constraint
@@ -147,25 +365,37 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        globeKeyInRow3?.isHidden = !needsInputModeSwitchKey
         if currentMode == .result {
             resultGlobeButton.isHidden = !needsInputModeSwitchKey
         }
     }
 
     override func textDidChange(_ textInput: (any UITextInput)?) {
+        debugLog.append("textDidChange: textInput=\(textInput != nil ? "present" : "nil")")
+        if #available(iOS 18.4, *), let textInput {
+            if let ctx = textInput.conversationContext ?? nil {
+                debugLog.append("  .conversationContext=present(\(ctx.entries.count) entries)")
+            } else {
+                debugLog.append("  .conversationContext=nil")
+            }
+        }
         captureConversationContext(from: textInput)
     }
 
     @available(iOS 18.4, *)
     override func conversationContext(_ context: UIConversationContext?, didChange textInput: (any UITextInput)?) {
+        if let context {
+            debugLog.append("conversationContext(didChange): present(\(context.entries.count) entries)")
+        } else {
+            debugLog.append("conversationContext(didChange): nil")
+        }
         latestConversationContext = context
     }
 
     // MARK: - Hierarchy Setup
 
     private func configureHierarchy() {
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .clear
 
         // Prompt row
         configurePromptRow()
@@ -185,29 +415,39 @@ final class KeyboardViewController: UIInputViewController {
         resultContainer.translatesAutoresizingMaskIntoConstraints = false
         loadingOverlay.translatesAutoresizingMaskIntoConstraints = false
 
+        promptGlow.translatesAutoresizingMaskIntoConstraints = false
+
+        view.addSubview(promptGlow)
         view.addSubview(promptRow)
         view.addSubview(keyboardContainer)
         view.addSubview(resultContainer)
         view.addSubview(loadingOverlay)
+        view.addSubview(keyPreview)
 
         NSLayoutConstraint.activate([
-            // Prompt row: top with 12px padding, sides with 3px
-            promptRow.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
-            promptRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 3),
-            promptRow.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -3),
-            promptRow.heightAnchor.constraint(equalToConstant: 34),
+            // Prompt row: top with 10px padding, sides with 8px
+            promptRow.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
+            promptRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+            promptRow.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            promptRow.heightAnchor.constraint(equalToConstant: 40),
 
-            // Keyboard container: below prompt row with 4px spacing
-            keyboardContainer.topAnchor.constraint(equalTo: promptRow.bottomAnchor, constant: 4),
+            // Glow border: matches prompt row
+            promptGlow.topAnchor.constraint(equalTo: promptRow.topAnchor),
+            promptGlow.leadingAnchor.constraint(equalTo: promptRow.leadingAnchor),
+            promptGlow.trailingAnchor.constraint(equalTo: promptRow.trailingAnchor),
+            promptGlow.bottomAnchor.constraint(equalTo: promptRow.bottomAnchor),
+
+            // Keyboard container: below prompt row with 12px spacing
+            keyboardContainer.topAnchor.constraint(equalTo: promptRow.bottomAnchor, constant: 12),
             keyboardContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 3),
             keyboardContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -3),
-            keyboardContainer.heightAnchor.constraint(equalToConstant: 234),
+            keyboardContainer.heightAnchor.constraint(equalToConstant: 206),
 
             // Result container: same position as keyboard container
-            resultContainer.topAnchor.constraint(equalTo: promptRow.bottomAnchor, constant: 4),
+            resultContainer.topAnchor.constraint(equalTo: promptRow.bottomAnchor, constant: 12),
             resultContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 3),
             resultContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -3),
-            resultContainer.heightAnchor.constraint(equalToConstant: 234),
+            resultContainer.heightAnchor.constraint(equalToConstant: 206),
 
             // Loading overlay: same frame as keyboard container
             loadingOverlay.topAnchor.constraint(equalTo: keyboardContainer.topAnchor),
@@ -229,43 +469,23 @@ final class KeyboardViewController: UIInputViewController {
         // Prompt field (display only)
         promptField.isUserInteractionEnabled = false
         promptField.borderStyle = .none
-        promptField.layer.cornerRadius = 10
+        promptField.layer.cornerRadius = 12
         promptField.layer.cornerCurve = .continuous
-        promptField.layer.borderWidth = 1
+        promptField.layer.borderWidth = 0
         promptField.font = UIFont.systemFont(ofSize: 15)
         promptField.leftViewMode = .always
         promptField.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 10, height: 1))
         promptField.rightViewMode = .always
         promptField.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 10, height: 1))
 
-        // Send button
-        let sendConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-        let sendImage = UIImage(systemName: "arrow.up", withConfiguration: sendConfig)
-        sendButton.setImage(sendImage, for: .normal)
-        sendButton.tintColor = .white
-        sendButton.backgroundColor = .systemBlue
-        sendButton.layer.cornerRadius = 17
-        sendButton.layer.cornerCurve = .continuous
-        sendButton.layer.borderWidth = 0.5
-        sendButton.translatesAutoresizingMaskIntoConstraints = false
-        sendButton.isEnabled = false
-        sendButton.alpha = 0.4
-        sendButton.addTarget(self, action: #selector(onAskClaude), for: .touchUpInside)
-
-        NSLayoutConstraint.activate([
-            sendButton.widthAnchor.constraint(equalToConstant: 34),
-            sendButton.heightAnchor.constraint(equalToConstant: 34),
-        ])
-
         promptRow.addArrangedSubview(promptField)
-        promptRow.addArrangedSubview(sendButton)
     }
 
     private func configureKeyboardContainer() {
         keyboardContainer.axis = .vertical
         keyboardContainer.alignment = .fill
         keyboardContainer.distribution = .fill
-        keyboardContainer.spacing = 6
+        keyboardContainer.spacing = 10
     }
 
     private func configureResultContainer() {
@@ -362,7 +582,6 @@ final class KeyboardViewController: UIInputViewController {
 
         // Clear keyMap entries (but keep the map for new keys)
         keyMap.removeAll()
-        globeKeyInRow3 = nil
         shiftKeyButton = nil
         row3SendButton = nil
 
@@ -384,21 +603,72 @@ final class KeyboardViewController: UIInputViewController {
         let row0 = makeKeyRow(keys: row0Keys, rowIndex: 0)
         keyboardContainer.addArrangedSubview(row0)
 
-        // Row 1: A S D F G H J K L (centered with spacers)
+        // Grab a row 0 key to use as width reference
+        let row0RefButton = keyMap.first(where: {
+            if case .character("Q") = $0.value.type { return true }
+            return false
+        })?.key
+
+        // Row 1: A S D F G H J K L (centered with spacers, matching row 0 key width)
         let row1Keys: [KeyDefinition] = "ASDFGHJKL".map {
             KeyDefinition(type: .character(String($0)), label: String($0), widthMultiplier: 1.0)
         }
         let row1 = makeKeyRow(keys: row1Keys, rowIndex: 1, centered: true)
         keyboardContainer.addArrangedSubview(row1)
 
-        // Row 2: Shift Z X C V B N M Backspace
-        var row2Keys: [KeyDefinition] = []
-        row2Keys.append(KeyDefinition(type: .shift, label: "shift", widthMultiplier: 1.5))
-        for c in "ZXCVBNM" {
-            row2Keys.append(KeyDefinition(type: .character(String(c)), label: String(c), widthMultiplier: 1.0))
+        // Constrain row 1 keys to match row 0 key width
+        if let ref = row0RefButton {
+            for (button, def) in keyMap {
+                if case .character(let c) = def.type, "ASDFGHJKL".contains(c) {
+                    button.widthAnchor.constraint(equalTo: ref.widthAnchor).isActive = true
+                }
+            }
         }
-        row2Keys.append(KeyDefinition(type: .backspace, label: "delete.left", widthMultiplier: 1.5))
-        let row2 = makeKeyRow(keys: row2Keys, rowIndex: 2)
+
+        // Row 2: Shift [gap] Z X C V B N M [gap] Backspace
+        let row2 = UIStackView()
+        row2.axis = .horizontal
+        row2.alignment = .fill
+        row2.distribution = .fill
+        row2.spacing = 6
+        row2.translatesAutoresizingMaskIntoConstraints = false
+
+        let shiftDef = KeyDefinition(type: .shift, label: "shift", widthMultiplier: 1.3)
+        let shiftButton = makeKeyButton(definition: shiftDef, isSpecial: true)
+        row2.addArrangedSubview(shiftButton)
+
+        let leftGap = UIView()
+        leftGap.translatesAutoresizingMaskIntoConstraints = false
+        leftGap.widthAnchor.constraint(equalToConstant: 4).isActive = true
+        row2.addArrangedSubview(leftGap)
+
+        var row2CharButtons: [UIButton] = []
+        for c in "ZXCVBNM" {
+            let def = KeyDefinition(type: .character(String(c)), label: String(c), widthMultiplier: 1.0)
+            let btn = makeKeyButton(definition: def, isSpecial: false)
+            row2.addArrangedSubview(btn)
+            row2CharButtons.append(btn)
+        }
+
+        let rightGap = UIView()
+        rightGap.translatesAutoresizingMaskIntoConstraints = false
+        rightGap.widthAnchor.constraint(equalToConstant: 4).isActive = true
+        row2.addArrangedSubview(rightGap)
+
+        let bkspDef = KeyDefinition(type: .backspace, label: "delete.left", widthMultiplier: 1.3)
+        let bkspButton = makeKeyButton(definition: bkspDef, isSpecial: true)
+        row2.addArrangedSubview(bkspButton)
+
+        // Equal-width character keys, shift/backspace proportional
+        if let first = row2CharButtons.first {
+            for other in row2CharButtons.dropFirst() {
+                other.widthAnchor.constraint(equalTo: first.widthAnchor).isActive = true
+            }
+            shiftButton.widthAnchor.constraint(equalTo: first.widthAnchor, multiplier: 1.3).isActive = true
+            bkspButton.widthAnchor.constraint(equalTo: first.widthAnchor, multiplier: 1.3).isActive = true
+        }
+
+        row2.heightAnchor.constraint(equalToConstant: 44).isActive = true
         keyboardContainer.addArrangedSubview(row2)
     }
 
@@ -430,44 +700,33 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func buildBottomRow() {
-        // Row 3: [123/ABC 1.5x] [globe 1x] [space flexible] [. 1x] [send 1.5x]
+        // Row 3: [123/ABC] [globe] [space flexible] [send]
         let row3 = UIStackView()
         row3.axis = .horizontal
         row3.alignment = .fill
         row3.distribution = .fill
-        row3.spacing = 4
+        row3.spacing = 6
         row3.translatesAutoresizingMaskIntoConstraints = false
-
-        let baseWidth = calculateBaseKeyWidth()
 
         // 123/ABC toggle key
         let toggleLabel = isNumberMode ? "ABC" : "123"
         let toggleDef = KeyDefinition(type: .toggleNumbers, label: toggleLabel, widthMultiplier: 1.5)
-        let toggleButton = makeKeyButton(definition: toggleDef, baseWidth: baseWidth, isSpecial: true)
+        let toggleButton = makeKeyButton(definition: toggleDef, isSpecial: true)
         row3.addArrangedSubview(toggleButton)
-
-        // Globe key
-        let globeDef = KeyDefinition(type: .nextKeyboard, label: "globe", widthMultiplier: 1.0)
-        let globeButton = makeKeyButton(definition: globeDef, baseWidth: baseWidth, isSpecial: true)
-        globeButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-        // Remove the standard touchUpInside target we added in makeKeyButton for nextKeyboard
-        globeKeyInRow3 = globeButton
-        row3.addArrangedSubview(globeButton)
 
         // Space bar (flexible)
         let spaceDef = KeyDefinition(type: .space, label: "space", widthMultiplier: 1.0)
         let spaceButton = UIButton(type: .system)
         spaceButton.setTitle("space", for: .normal)
-        spaceButton.titleLabel?.font = UIFont.systemFont(ofSize: 15)
+        spaceButton.titleLabel?.font = UIFont.systemFont(ofSize: 16)
         spaceButton.setTitleColor(.label, for: .normal)
         spaceButton.backgroundColor = keyBackgroundColor(isSpecial: false)
-        spaceButton.layer.cornerRadius = 5
+        spaceButton.layer.cornerRadius = 8
         spaceButton.layer.cornerCurve = .continuous
-        spaceButton.layer.borderWidth = 0.5
         spaceButton.layer.shadowColor = UIColor.black.cgColor
-        spaceButton.layer.shadowOpacity = 0.2
+        spaceButton.layer.shadowOpacity = 0.3
         spaceButton.layer.shadowOffset = CGSize(width: 0, height: 1)
-        spaceButton.layer.shadowRadius = 0.5
+        spaceButton.layer.shadowRadius = 1
         keyMap[spaceButton] = spaceDef
         spaceButton.addTarget(self, action: #selector(keyTouchDown(_:)), for: .touchDown)
         spaceButton.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
@@ -477,11 +736,6 @@ final class KeyboardViewController: UIInputViewController {
         spaceButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         row3.addArrangedSubview(spaceButton)
 
-        // Period key
-        let periodDef = KeyDefinition(type: .period, label: ".", widthMultiplier: 1.0)
-        let periodButton = makeKeyButton(definition: periodDef, baseWidth: baseWidth, isSpecial: true)
-        row3.addArrangedSubview(periodButton)
-
         // Send key (arrow.up)
         let sendDef = KeyDefinition(type: .returnSend, label: "arrow.up", widthMultiplier: 1.5)
         let row3Send = UIButton(type: .system)
@@ -490,12 +744,13 @@ final class KeyboardViewController: UIInputViewController {
         row3Send.setImage(sendImage, for: .normal)
         row3Send.tintColor = .white
         row3Send.backgroundColor = .systemBlue
-        row3Send.layer.cornerRadius = 5
+        row3Send.layer.cornerRadius = 8
         row3Send.layer.cornerCurve = .continuous
-        row3Send.layer.borderWidth = 0.5
+        row3Send.layer.shadowColor = UIColor.black.cgColor
+        row3Send.layer.shadowOpacity = 0.3
+        row3Send.layer.shadowOffset = CGSize(width: 0, height: 1)
+        row3Send.layer.shadowRadius = 1
         row3Send.translatesAutoresizingMaskIntoConstraints = false
-        let sendWidth = baseWidth * 1.5
-        row3Send.widthAnchor.constraint(equalToConstant: sendWidth).isActive = true
         keyMap[row3Send] = sendDef
         row3Send.addTarget(self, action: #selector(keyTouchDown(_:)), for: .touchDown)
         row3Send.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
@@ -506,8 +761,18 @@ final class KeyboardViewController: UIInputViewController {
         row3SendButton = row3Send
         row3.addArrangedSubview(row3Send)
 
+        // Fixed width for non-space keys; space takes remaining room
+        let unitWidth: CGFloat = 40
+        toggleButton.widthAnchor.constraint(equalToConstant: unitWidth * 1.5).isActive = true
+        row3Send.widthAnchor.constraint(equalToConstant: unitWidth * 1.5).isActive = true
+
+        toggleButton.setContentHuggingPriority(.required, for: .horizontal)
+        row3Send.setContentHuggingPriority(.required, for: .horizontal)
+        toggleButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        row3Send.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         // Row height
-        row3.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        row3.heightAnchor.constraint(equalToConstant: 44).isActive = true
 
         keyboardContainer.addArrangedSubview(row3)
     }
@@ -518,14 +783,13 @@ final class KeyboardViewController: UIInputViewController {
         let row = UIStackView()
         row.axis = .horizontal
         row.alignment = .fill
-        row.distribution = .fill
-        row.spacing = 4
+        row.spacing = 6
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        let baseWidth = calculateBaseKeyWidth()
+        var standardButtons: [UIButton] = []
+        var wideButtons: [(UIButton, CGFloat)] = []
 
         if centered {
-            // Add leading flexible spacer
             let leadingSpacer = UIView()
             leadingSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
             leadingSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -540,28 +804,49 @@ final class KeyboardViewController: UIInputViewController {
             default:
                 isSpecial = true
             }
-            let button = makeKeyButton(definition: keyDef, baseWidth: baseWidth, isSpecial: isSpecial)
+            let button = makeKeyButton(definition: keyDef, isSpecial: isSpecial)
             row.addArrangedSubview(button)
+
+            if keyDef.widthMultiplier != 1.0 {
+                wideButtons.append((button, keyDef.widthMultiplier))
+            } else {
+                standardButtons.append(button)
+            }
         }
 
         if centered {
-            // Add trailing flexible spacer
             let trailingSpacer = UIView()
             trailingSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
             trailingSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(trailingSpacer)
 
-            // Make spacers equal width
             if let leading = row.arrangedSubviews.first, let trailing = row.arrangedSubviews.last {
                 trailing.widthAnchor.constraint(equalTo: leading.widthAnchor).isActive = true
             }
         }
 
-        row.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        if wideButtons.isEmpty && !centered {
+            // All keys same width (e.g. QWERTYUIOP): fillEqually
+            row.distribution = .fillEqually
+        } else {
+            row.distribution = .fill
+            // Constrain all standard-width keys to equal width
+            if let first = standardButtons.first {
+                for other in standardButtons.dropFirst() {
+                    other.widthAnchor.constraint(equalTo: first.widthAnchor).isActive = true
+                }
+                // Constrain wide keys proportional to standard keys
+                for (wideButton, multiplier) in wideButtons {
+                    wideButton.widthAnchor.constraint(equalTo: first.widthAnchor, multiplier: multiplier).isActive = true
+                }
+            }
+        }
+
+        row.heightAnchor.constraint(equalToConstant: 44).isActive = true
         return row
     }
 
-    private func makeKeyButton(definition: KeyDefinition, baseWidth: CGFloat, isSpecial: Bool) -> UIButton {
+    private func makeKeyButton(definition: KeyDefinition, isSpecial: Bool) -> UIButton {
         let button = UIButton(type: .system)
         button.translatesAutoresizingMaskIntoConstraints = false
 
@@ -569,9 +854,10 @@ final class KeyboardViewController: UIInputViewController {
         switch definition.type {
         case .character:
             button.setTitle(isShifted || isCapsLocked ? definition.label.uppercased() : definition.label.lowercased(), for: .normal)
-            button.titleLabel?.font = UIFont.systemFont(ofSize: 22)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 26, weight: .light)
             button.setTitleColor(.label, for: .normal)
             button.backgroundColor = keyBackgroundColor(isSpecial: false)
+            button.titleEdgeInsets = UIEdgeInsets(top: -2, left: 0, bottom: 2, right: 0)
 
         case .shift:
             let symbolName: String
@@ -582,21 +868,21 @@ final class KeyboardViewController: UIInputViewController {
             } else {
                 symbolName = "shift"
             }
-            let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+            let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .light)
             button.setImage(UIImage(systemName: symbolName, withConfiguration: config), for: .normal)
             button.tintColor = .label
             button.backgroundColor = keyBackgroundColor(isSpecial: true)
             shiftKeyButton = button
 
         case .backspace:
-            let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+            let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .light)
             button.setImage(UIImage(systemName: "delete.left", withConfiguration: config), for: .normal)
             button.tintColor = .label
             button.backgroundColor = keyBackgroundColor(isSpecial: true)
 
         case .space:
             button.setTitle("space", for: .normal)
-            button.titleLabel?.font = UIFont.systemFont(ofSize: 15)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 16)
             button.setTitleColor(.label, for: .normal)
             button.backgroundColor = keyBackgroundColor(isSpecial: false)
 
@@ -607,38 +893,31 @@ final class KeyboardViewController: UIInputViewController {
             button.backgroundColor = .systemBlue
 
         case .nextKeyboard:
-            let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+            let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .light)
             button.setImage(UIImage(systemName: "globe", withConfiguration: config), for: .normal)
             button.tintColor = .label
             button.backgroundColor = keyBackgroundColor(isSpecial: true)
 
         case .toggleNumbers:
             button.setTitle(definition.label, for: .normal)
-            button.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .regular)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .regular)
             button.setTitleColor(.label, for: .normal)
             button.backgroundColor = keyBackgroundColor(isSpecial: true)
 
         case .period:
             button.setTitle(".", for: .normal)
-            button.titleLabel?.font = UIFont.systemFont(ofSize: 22)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 16)
             button.setTitleColor(.label, for: .normal)
             button.backgroundColor = keyBackgroundColor(isSpecial: true)
         }
 
-        // Corner radius and shadow
-        button.layer.cornerRadius = 5
+        // Corner radius and shadow (no border per iOS keyboard style)
+        button.layer.cornerRadius = 8
         button.layer.cornerCurve = .continuous
-        button.layer.borderWidth = 0.5
         button.layer.shadowColor = UIColor.black.cgColor
-        button.layer.shadowOpacity = 0.2
+        button.layer.shadowOpacity = 0.3
         button.layer.shadowOffset = CGSize(width: 0, height: 1)
-        button.layer.shadowRadius = 0.5
-
-        // Width constraint
-        let width = baseWidth * definition.widthMultiplier
-        let widthConstraint = button.widthAnchor.constraint(equalToConstant: width)
-        widthConstraint.priority = UILayoutPriority(999)
-        widthConstraint.isActive = true
+        button.layer.shadowRadius = 1
 
         // Store in keyMap
         keyMap[button] = definition
@@ -656,57 +935,31 @@ final class KeyboardViewController: UIInputViewController {
         return button
     }
 
-    private func calculateBaseKeyWidth() -> CGFloat {
-        let containerWidth = view.bounds.width - 6 // 3px padding on each side
-        let keySpacing: CGFloat = 4.0
-        let baseWidth = (containerWidth - (9 * keySpacing)) / 10.0
-        return max(baseWidth, 20) // minimum safety
-    }
-
     private func keyBackgroundColor(isSpecial: Bool) -> UIColor {
-        let isDark = traitCollection.userInterfaceStyle == .dark
-        if isDark {
-            return isSpecial
-                ? UIColor(red: 0.32, green: 0.34, blue: 0.39, alpha: 1.0)
-                : UIColor(red: 0.41, green: 0.43, blue: 0.47, alpha: 1.0)
-        }
-        return isSpecial
-            ? UIColor(red: 0.69, green: 0.71, blue: 0.75, alpha: 1.0)
-            : .white
+        return UIColor(red: 0.235, green: 0.235, blue: 0.235, alpha: 1.0)  // #3C3C3C
     }
 
-    private func keyBorderColor() -> UIColor {
-        let isDark = traitCollection.userInterfaceStyle == .dark
-        return isDark
-            ? UIColor(white: 1.0, alpha: 0.14)
-            : UIColor(white: 0.0, alpha: 0.12)
-    }
-
-    private func keyboardSurfaceColor() -> UIColor {
-        let isDark = traitCollection.userInterfaceStyle == .dark
-        return isDark
-            ? UIColor(red: 0.17, green: 0.18, blue: 0.20, alpha: 1.0)
-            : UIColor(red: 0.82, green: 0.84, blue: 0.87, alpha: 1.0)
-    }
 
     // MARK: - Key Actions
 
     @objc private func keyTouchDown(_ sender: UIButton) {
+        haptic.impactOccurred()
+
         UIView.animate(withDuration: 0.05) {
             sender.transform = CGAffineTransform(scaleX: 0.95, y: 0.95)
         }
 
-        // Start backspace repeat timer
+        // Show key preview for character keys
         guard let def = keyMap[sender] else { return }
+        if case .character(let c) = def.type {
+            let display = (isShifted || isCapsLocked) ? c.uppercased() : c.lowercased()
+            keyPreview.show(for: sender, character: display, in: view)
+        }
         if case .backspace = def.type {
             backspaceTimer?.invalidate()
-            backspaceTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
-                self?.backspaceTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                    guard let self else { return }
-                    if !self.promptText.isEmpty {
-                        self.promptText.removeLast()
-                    }
-                }
+            backspaceDeleteCount = 0
+            backspaceTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+                self?.scheduleBackspaceRepeat()
             }
         }
     }
@@ -716,6 +969,7 @@ final class KeyboardViewController: UIInputViewController {
             sender.transform = .identity
         }
 
+        keyPreview.hide()
         backspaceTimer?.invalidate()
         backspaceTimer = nil
 
@@ -778,8 +1032,23 @@ final class KeyboardViewController: UIInputViewController {
         UIView.animate(withDuration: 0.05) {
             sender.transform = .identity
         }
+        keyPreview.hide()
         backspaceTimer?.invalidate()
         backspaceTimer = nil
+    }
+
+    private func scheduleBackspaceRepeat() {
+        // Accelerate: start at 0.07s, ramp to 0.03s after 20 deletes
+        let interval = max(0.03, 0.07 - Double(backspaceDeleteCount) * 0.002)
+        backspaceTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if !self.promptText.isEmpty {
+                self.haptic.impactOccurred()
+                self.promptText.removeLast()
+                self.backspaceDeleteCount += 1
+            }
+            self.scheduleBackspaceRepeat()
+        }
     }
 
     // MARK: - Shift Helpers
@@ -794,7 +1063,7 @@ final class KeyboardViewController: UIInputViewController {
         } else {
             symbolName = "shift"
         }
-        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .light)
         shiftButton.setImage(UIImage(systemName: symbolName, withConfiguration: config), for: .normal)
     }
 
@@ -830,24 +1099,23 @@ final class KeyboardViewController: UIInputViewController {
         switch mode {
         case .input:
             promptRow.isHidden = false
+            promptGlow.isHidden = false
             keyboardContainer.isHidden = false
             resultContainer.isHidden = true
             loadingOverlay.isHidden = true
-            sendButton.isEnabled = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            sendButton.alpha = sendButton.isEnabled ? 1.0 : 0.4
             setAllKeysEnabled(true)
 
         case .loading:
             promptRow.isHidden = false
+            promptGlow.isHidden = false
             keyboardContainer.isHidden = false
             resultContainer.isHidden = true
             loadingOverlay.isHidden = false
-            sendButton.isEnabled = false
-            sendButton.alpha = 0.4
             setAllKeysEnabled(false)
 
         case .result:
             promptRow.isHidden = true
+            promptGlow.isHidden = true
             keyboardContainer.isHidden = true
             resultContainer.isHidden = false
             loadingOverlay.isHidden = true
@@ -873,15 +1141,18 @@ final class KeyboardViewController: UIInputViewController {
     private func applyAppearance() {
         let isDark = traitCollection.userInterfaceStyle == .dark
         let separatorAlpha: CGFloat = isDark ? 0.42 : 0.2
-        let keyShadowOpacity: Float = isDark ? 0.0 : 0.18
+        let keyShadowOpacity: Float = isDark ? 0.7 : 0.3
 
-        view.backgroundColor = keyboardSurfaceColor()
+        view.backgroundColor = .clear
 
         // Prompt field
         promptField.textColor = .label
         promptField.backgroundColor = .secondarySystemBackground
-        promptField.layer.borderColor = UIColor.separator.withAlphaComponent(separatorAlpha).cgColor
         updatePromptPlaceholderVisibility()
+
+        // Rotating glow border
+        let glowColor = UIColor(red: 1.0, green: 0.6, blue: 0.2, alpha: 1.0)
+        promptGlow.updateAppearance(bright: glowColor)
 
         // Output view
         outputView.backgroundColor = .secondarySystemBackground
@@ -890,7 +1161,6 @@ final class KeyboardViewController: UIInputViewController {
 
         // Update key colors
         for (button, def) in keyMap {
-            button.layer.borderColor = keyBorderColor().cgColor
             button.layer.shadowOpacity = keyShadowOpacity
             switch def.type {
             case .character:
@@ -914,7 +1184,10 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
 
-        // Loading overlay
+        // Key preview
+        keyPreview.updateAppearance(fillColor: keyBackgroundColor(isSpecial: false), shadowOpacity: keyShadowOpacity)
+
+        // Result buttons
         if var newPromptConfig = newPromptButton.configuration {
             newPromptConfig.baseBackgroundColor = .systemBlue
             newPromptConfig.baseForegroundColor = .white
@@ -926,9 +1199,7 @@ final class KeyboardViewController: UIInputViewController {
             resultInsertButton.configuration = insertConfig
         }
         resultGlobeButton.tintColor = .label
-        sendButton.layer.borderColor = keyBorderColor().cgColor
-        row3SendButton?.layer.borderColor = keyBorderColor().cgColor
-        loadingOverlay.backgroundColor = keyboardSurfaceColor().withAlphaComponent(0.82)
+        loadingOverlay.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.82)
         loadingLabel.textColor = .label
     }
 
@@ -949,6 +1220,52 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func onAskClaude() {
         let trimmed = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
+            return
+        }
+
+        // Debug: type "//version" to check system info
+        if trimmed == "//version" {
+            let ver = ProcessInfo.processInfo.operatingSystemVersion
+            let iosVersion = "\(ver.majorVersion).\(ver.minorVersion).\(ver.patchVersion)"
+            let fullAccess = hasFullAccess ? "YES" : "NO"
+            latestReply = ""
+            latestResultText = "iOS \(iosVersion)\nFull Access: \(fullAccess)"
+            currentMode = .result
+            return
+        }
+
+        // Debug: type "//debug" to dump the full payload
+        if trimmed == "//debug" {
+            let proxy = textDocumentProxy
+            let conversationContextPayload: KeyboardConversationContextPayload?
+            if #available(iOS 18.4, *) {
+                conversationContextPayload = serializeConversationContext(
+                    latestConversationContext as? UIConversationContext
+                )
+            } else {
+                conversationContextPayload = nil
+            }
+            let debugPayload = KeyboardRequestPayload(
+                prompt: "(debug)",
+                selectedText: proxy.selectedText,
+                documentContextBeforeInput: proxy.documentContextBeforeInput,
+                documentContextAfterInput: proxy.documentContextAfterInput,
+                documentIdentifier: proxy.documentIdentifier.uuidString,
+                conversationContext: conversationContextPayload
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let json = (try? encoder.encode(debugPayload)).flatMap { String(data: $0, encoding: .utf8) } ?? "encode failed"
+            let contextStatus: String
+            if #available(iOS 18.4, *) {
+                contextStatus = latestConversationContext != nil ? "captured" : "nil"
+            } else {
+                contextStatus = "requires iOS 18.4+"
+            }
+            let log = debugLog.isEmpty ? "(no events)" : debugLog.joined(separator: "\n")
+            latestReply = ""
+            latestResultText = "Context: \(contextStatus)\n\n--- Event Log ---\n\(log)\n\n--- Payload ---\n\(json)"
+            currentMode = .result
             return
         }
 
@@ -1001,7 +1318,6 @@ final class KeyboardViewController: UIInputViewController {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(sharedConfig.token)", forHTTPHeaderField: "Authorization")
         request.httpBody = body
 
         currentMode = .loading
@@ -1075,14 +1391,7 @@ final class KeyboardViewController: UIInputViewController {
             currentMode = .result
             return nil
         }
-        guard let token = defaults.string(forKey: bridgeTokenKey), !token.isEmpty else {
-            latestReply = ""
-            latestResultText = "Bridge token is missing. Pair from the cc-bridge app first."
-            outputView.text = latestResultText
-            currentMode = .result
-            return nil
-        }
-        return SharedBridgeConfig(serverURL: serverURL, token: token)
+        return SharedBridgeConfig(serverURL: serverURL)
     }
 
     private func makeKeyboardEndpoint(from serverURL: String) -> URL? {
