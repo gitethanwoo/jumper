@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
+import QRCode from "qrcode";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import type {
@@ -18,17 +19,7 @@ import type {
   KeyboardRespondSuccess,
   ServerToClient,
 } from "./types.js";
-import { nowIso, loadState, loadTokens, saveState, saveTokens, tokenRecord } from "./state.js";
-
-type AuthedConn = {
-  ws: WebSocket;
-  token: string;
-};
-
-type Conn = {
-  ws: WebSocket;
-  authed: AuthedConn | null;
-};
+import { nowIso, loadState, saveState } from "./state.js";
 
 type State = Awaited<ReturnType<typeof loadState>>;
 
@@ -84,8 +75,65 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
+function expandHomePath(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed === "~") return os.homedir();
+  if (trimmed.startsWith("~/")) return path.join(os.homedir(), trimmed.slice(2));
+  if (trimmed.startsWith("~\\")) return path.join(os.homedir(), trimmed.slice(2));
+  return trimmed;
+}
+
+function normalizeProjectPath(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) throw new Error("Project path cannot be empty");
+
+  const expanded = expandHomePath(trimmed);
+  if (path.isAbsolute(expanded)) {
+    return path.normalize(expanded);
+  }
+
+  // Relative paths from mobile are ambiguous; anchor them to the user's home directory.
+  return path.resolve(os.homedir(), expanded);
+}
+
+async function normalizeStateProjectPaths(state: State): Promise<State> {
+  const normalizedProjects = state.projects.map((project) => {
+    const normalizedPath = normalizeProjectPath(project.path);
+    if (normalizedPath === project.path) return project;
+    return { ...project, path: normalizedPath };
+  });
+
+  const changed = normalizedProjects.some((project, index) => project !== state.projects[index]);
+  if (!changed) return state;
+
+  const next = { ...state, projects: normalizedProjects };
+  await saveState(next);
+  return next;
+}
+
 function claudeProjectDir(cwd: string): string {
   return path.join(os.homedir(), ".claude", "projects", cwd.split(path.sep).join("-"));
+}
+
+function claudeHistoryCandidates(projectPath: string): string[] {
+  const trimmed = projectPath.trim();
+  const expanded = expandHomePath(trimmed);
+  const resolvedRaw = path.resolve(trimmed);
+  const resolvedExpanded = path.resolve(expanded);
+  return Array.from(new Set([trimmed, expanded, resolvedRaw, resolvedExpanded].filter((v) => v.length > 0)));
+}
+
+async function findHistoryFileBySessionId(sessionId: string): Promise<string | undefined> {
+  const projectsDir = path.join(os.homedir(), ".claude", "projects");
+  if (!existsSync(projectsDir)) return undefined;
+
+  const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(projectsDir, entry.name, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function extractAssistantText(entry: unknown): string | null {
@@ -117,8 +165,13 @@ async function loadClaudeHistory(projectPath: string, sessionId: string): Promis
   messages: ChatHistoryMessage[];
   events: unknown[];
 }> {
-  const filePath = path.join(claudeProjectDir(projectPath), `${sessionId}.jsonl`);
-  if (!existsSync(filePath)) return { messages: [], events: [] };
+  let filePath = claudeHistoryCandidates(projectPath)
+    .map((cwd) => path.join(claudeProjectDir(cwd), `${sessionId}.jsonl`))
+    .find((candidate) => existsSync(candidate));
+  if (!filePath) {
+    filePath = await findHistoryFileBySessionId(sessionId);
+  }
+  if (!filePath) return { messages: [], events: [] };
 
   const raw = await fs.readFile(filePath, "utf8");
   const lines = raw.split("\n").filter((line) => line.trim().length > 0);
@@ -130,7 +183,12 @@ async function loadClaudeHistory(projectPath: string, sessionId: string): Promis
     const entry: unknown = JSON.parse(line);
     if (!isObject(entry)) return;
 
-    if (entry.type === "assistant" || entry.type === "user") {
+    if (
+      entry.type === "assistant" ||
+      entry.type === "user" ||
+      entry.type === "progress" ||
+      entry.type === "result"
+    ) {
       events.push(entry);
     }
 
@@ -164,15 +222,6 @@ function parseMessage(data: WebSocket.RawData): ClientToServer {
   return parsed as ClientToServer;
 }
 
-function pairingCode(): string {
-  const n = crypto.randomInt(0, 1_000_000);
-  return String(n).padStart(6, "0");
-}
-
-function newToken(): string {
-  return crypto.randomBytes(32).toString("base64url");
-}
-
 function jsonResponse(res: http.ServerResponse, statusCode: number, value: unknown): void {
   res.writeHead(statusCode, { "content-type": "application/json" });
   res.end(JSON.stringify(value));
@@ -185,15 +234,6 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   }
   const text = Buffer.concat(chunks).toString("utf8");
   return JSON.parse(text);
-}
-
-function parseBearerToken(authorization: string | undefined): string | null {
-  if (!authorization?.startsWith("Bearer ")) return null;
-  return authorization.slice("Bearer ".length).trim();
-}
-
-function hasToken(tokens: { token: string }[], token: string): boolean {
-  return tokens.some((entry) => entry.token === token);
 }
 
 function clampText(value: string, maxLength: number): string {
@@ -475,30 +515,230 @@ function buildClaudePrompt(text: string, attachments: ChatAttachment[], projectP
   return `${textPart}\n\nAttached files:\n${attachmentLines.join("\n")}`;
 }
 
+function wsUrlForHost(hostWithPort: string, secure: boolean): string {
+  return `${secure ? "wss" : "ws"}://${hostWithPort}/ws`;
+}
+
+function connectLinkForServer(serverUrl: string): string {
+  return `mobile://connect?server=${encodeURIComponent(serverUrl)}`;
+}
+
+function connectPageUrlForServer(hostWithPort: string, secure: boolean): string {
+  return `${secure ? "https" : "http"}://${hostWithPort}/connect`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 async function main() {
   await fs.mkdir(PROJECTS_ROOT, { recursive: true });
 
-  const serverPairCode = pairingCode();
-  console.log(`[cc-bridge] pairing code: ${serverPairCode}`);
+  const suggestedHost = process.env.PUBLIC_HOST ?? `${os.hostname()}:${PORT}`;
+  const suggestedWs = wsUrlForHost(suggestedHost, false);
+  const suggestedConnectPage = connectPageUrlForServer(suggestedHost, false);
+  const suggestedDeepLink = connectLinkForServer(suggestedWs);
+
   console.log(`[cc-bridge] projects root: ${PROJECTS_ROOT}`);
   console.log(`[cc-bridge] host: ${HOST}`);
   console.log(`[cc-bridge] ws: ws://${HOST}:${PORT}/ws`);
+  console.log(`[cc-bridge] connect page: ${suggestedConnectPage}`);
+  console.log(`[cc-bridge] connect link: ${suggestedDeepLink}`);
 
   const active = new Map<string, ReturnType<typeof spawn>>();
 
-  let tokens = await loadTokens();
   let state: State = await loadState();
+  state = await normalizeStateProjectPaths(state);
 
   const httpServer = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const protoHeader = req.headers["x-forwarded-proto"];
+    const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
+    const secure = proto === "https";
+    const hostHeader = req.headers["x-forwarded-host"] ?? req.headers.host ?? `localhost:${PORT}`;
+    const hostWithPort =
+      (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader) ?? `localhost:${PORT}`;
+
+    if (req.method === "GET" && requestUrl.pathname === "/health") {
+      jsonResponse(res, 200, { ok: true, serverVersion: "0.1.0" });
+      return;
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/connect") {
+      const explicitServer = requestUrl.searchParams.get("server");
+      const serverUrl = explicitServer ?? wsUrlForHost(hostWithPort, secure);
+      const deepLink = connectLinkForServer(serverUrl);
+      const qrCodeImage = await QRCode.toDataURL(deepLink, {
+        width: 320,
+        margin: 1,
+      });
+      const manualConnectPage = connectPageUrlForServer(hostWithPort, secure);
+
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cc-bridge Connect</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(circle at 10% 20%, #fff7ed, #f5f5f4 45%, #e7e5e4);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #1c1917;
+      }
+      .card {
+        width: min(680px, calc(100vw - 32px));
+        background: #ffffff;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 20px;
+        padding: 22px;
+        box-sizing: border-box;
+        box-shadow: 0 16px 50px rgba(0, 0, 0, 0.08);
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 28px;
+        line-height: 1.1;
+      }
+      p {
+        margin: 0;
+        color: #57534e;
+        line-height: 1.45;
+      }
+      .layout {
+        display: grid;
+        gap: 20px;
+        margin-top: 18px;
+      }
+      @media (min-width: 680px) {
+        .layout {
+          grid-template-columns: 320px 1fr;
+          align-items: center;
+        }
+      }
+      .qr {
+        width: 100%;
+        max-width: 320px;
+        justify-self: center;
+        border-radius: 16px;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        background: #fff;
+      }
+      .steps {
+        display: grid;
+        gap: 10px;
+      }
+      .step {
+        display: grid;
+        grid-template-columns: 24px 1fr;
+        gap: 10px;
+        align-items: start;
+      }
+      .num {
+        width: 24px;
+        height: 24px;
+        border-radius: 999px;
+        background: #b45309;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 700;
+        display: grid;
+        place-items: center;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: #f5f5f4;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        margin-top: 10px;
+        font-size: 12px;
+        line-height: 1.35;
+        word-break: break-all;
+      }
+      .buttons {
+        margin-top: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button,
+      a.button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #1c1917;
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+      }
+      a.secondary {
+        background: #e7e5e4;
+        color: #292524;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Connect iPhone to cc-bridge</h1>
+      <p>Scan once. The app saves your server URL and connects automatically.</p>
+
+      <div class="layout">
+        <img class="qr" src="${qrCodeImage}" alt="QR code to connect mobile app" />
+        <div class="steps">
+          <div class="step">
+            <div class="num">1</div>
+            <p>Open your iPhone camera and scan this QR code.</p>
+          </div>
+          <div class="step">
+            <div class="num">2</div>
+            <p>Tap the banner to open the cc-bridge app.</p>
+          </div>
+          <div class="step">
+            <div class="num">3</div>
+            <p>It stores the bridge server URL and reconnects automatically.</p>
+          </div>
+
+          <div class="mono" id="server-url">${escapeHtml(serverUrl)}</div>
+          <div class="buttons">
+            <button id="copy-server">Copy Server URL</button>
+            <a class="button secondary" href="${escapeHtml(deepLink)}">Open Link</a>
+            <a class="button secondary" href="${escapeHtml(manualConnectPage)}">Refresh</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      const button = document.getElementById("copy-server");
+      const value = document.getElementById("server-url")?.textContent || "";
+      button?.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(value);
+        button.textContent = "Copied";
+        setTimeout(() => {
+          button.textContent = "Copy Server URL";
+        }, 1200);
+      });
+    </script>
+  </body>
+</html>`);
+      return;
+    }
 
     if (req.method === "POST" && requestUrl.pathname === "/upload-image") {
-      const token = parseBearerToken(req.headers.authorization);
-      if (!token || !hasToken(tokens, token)) {
-        jsonResponse(res, 401, { error: "Unauthorized" });
-        return;
-      }
-
       const payload = await readJsonBody(req);
       if (!isObject(payload)) throw new Error("upload-image body must be an object");
 
@@ -524,14 +764,15 @@ async function main() {
         return;
       }
 
+      const projectPath = normalizeProjectPath(project.path);
       const relativeDirFs = path.join(".claude", "tmp", chat.id);
       const relativeDir = relativeDirFs.split(path.sep).join("/");
       const id = crypto.randomUUID();
       const ext = fileExtension(body.fileName, body.mimeType);
       const storedFileName = `${id}${ext}`;
       const relativePath = `${relativeDir}/${storedFileName}`;
-      const absoluteDir = path.join(project.path, relativeDirFs);
-      const absolutePath = path.join(project.path, relativePath);
+      const absoluteDir = path.join(projectPath, relativeDirFs);
+      const absolutePath = path.join(projectPath, relativePath);
       const bytes = Buffer.from(body.base64, "base64");
       await fs.mkdir(absoluteDir, { recursive: true });
       await fs.writeFile(absolutePath, bytes);
@@ -548,12 +789,6 @@ async function main() {
     }
 
     if (req.method === "POST" && requestUrl.pathname === "/keyboard/respond") {
-      const token = parseBearerToken(req.headers.authorization);
-      if (!token || !hasToken(tokens, token)) {
-        jsonResponse(res, 401, { error: "Unauthorized" });
-        return;
-      }
-
       const payload = await readJsonBody(req);
       const body = sanitizeKeyboardRequest(payload);
       if (!body) {
@@ -594,41 +829,8 @@ async function main() {
   });
 
   wss.on("connection", (ws) => {
-    const conn: Conn = { ws, authed: null };
-
     ws.on("message", async (data) => {
       const msg = parseMessage(data);
-
-      if (msg.type === "pair") {
-        if (msg.code !== serverPairCode) {
-          send(ws, { type: "error", message: "Invalid pairing code" });
-          ws.close();
-          return;
-        }
-        const token = newToken();
-        tokens = [...tokens, tokenRecord(token, msg.deviceName)];
-        await saveTokens(tokens);
-        send(ws, { type: "paired", token });
-        return;
-      }
-
-      if (msg.type === "auth") {
-        const ok = hasToken(tokens, msg.token);
-        if (!ok) {
-          send(ws, { type: "error", message: "Invalid token" });
-          ws.close();
-          return;
-        }
-        conn.authed = { ws, token: msg.token };
-        send(ws, { type: "authed", serverVersion: "0.1.0" });
-        return;
-      }
-
-      if (!conn.authed) {
-        send(ws, { type: "error", message: "Not authenticated" });
-        ws.close();
-        return;
-      }
 
       if (msg.type === "projects.list") {
         send(ws, { type: "projects.list.result", projects: state.projects });
@@ -636,9 +838,10 @@ async function main() {
       }
 
       if (msg.type === "projects.create") {
-        const folder = slugify(msg.name);
-        const projectPath = path.join(PROJECTS_ROOT, folder);
-        await fs.mkdir(projectPath);
+        const projectPath = msg.path
+          ? normalizeProjectPath(msg.path)
+          : path.resolve(path.join(PROJECTS_ROOT, slugify(msg.name)));
+        await fs.mkdir(projectPath, { recursive: true });
 
         const project = { id: crypto.randomUUID(), name: msg.name, path: projectPath, createdAt: nowIso() };
         state = { ...state, projects: [...state.projects, project] };
@@ -649,7 +852,9 @@ async function main() {
       }
 
       if (msg.type === "chats.list") {
-        const chats = state.chats.filter((c) => c.projectId === msg.projectId);
+        const chats = msg.projectId
+          ? state.chats.filter((c) => c.projectId === msg.projectId)
+          : state.chats;
         send(ws, { type: "chats.list.result", chats });
         return;
       }
@@ -684,7 +889,8 @@ async function main() {
         const project = state.projects.find((p) => p.id === chat.projectId);
         if (!project) throw new Error("Unknown project");
 
-        const history = await loadClaudeHistory(project.path, chat.sessionId);
+        const projectPath = normalizeProjectPath(project.path);
+        const history = await loadClaudeHistory(projectPath, chat.sessionId);
         send(ws, {
           type: "chats.history.result",
           chatId: chat.id,
@@ -708,7 +914,8 @@ async function main() {
 
         const project = state.projects.find((p) => p.id === chat.projectId);
         if (!project) throw new Error("Unknown project");
-        const prompt = buildClaudePrompt(msg.text, msg.attachments ?? [], project.path);
+        const projectPath = normalizeProjectPath(project.path);
+        const prompt = buildClaudePrompt(msg.text, msg.attachments ?? [], projectPath);
 
         const args: string[] = [];
         if (chat.sessionId) args.push("-r", chat.sessionId);
@@ -726,7 +933,7 @@ async function main() {
         );
 
         const child = spawn("claude", args, {
-          cwd: project.path,
+          cwd: projectPath,
           stdio: ["ignore", "pipe", "pipe"],
           env: process.env,
         });

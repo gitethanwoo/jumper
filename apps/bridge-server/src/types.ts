@@ -1,13 +1,3 @@
-export type Authed = {
-  type: "authed";
-  serverVersion: string;
-};
-
-export type Paired = {
-  type: "paired";
-  token: string;
-};
-
 export type ErrorMessage = {
   type: "error";
   message: string;
@@ -118,8 +108,6 @@ export type ClaudeDone = {
 };
 
 export type ServerToClient =
-  | Authed
-  | Paired
   | ProjectsListResult
   | ProjectsCreateResult
   | ChatsListResult
@@ -129,11 +117,9 @@ export type ServerToClient =
   | ClaudeDone
   | ErrorMessage;
 
-export type AuthMessage = { type: "auth"; token: string };
-export type PairMessage = { type: "pair"; code: string; deviceName: string };
 export type ProjectsListMessage = { type: "projects.list" };
-export type ProjectsCreateMessage = { type: "projects.create"; name: string };
-export type ChatsListMessage = { type: "chats.list"; projectId: string };
+export type ProjectsCreateMessage = { type: "projects.create"; name: string; path?: string };
+export type ChatsListMessage = { type: "chats.list"; projectId?: string };
 export type ChatsCreateMessage = {
   type: "chats.create";
   projectId: string;
@@ -149,8 +135,6 @@ export type ChatsSendMessage = {
 export type ChatsCancelMessage = { type: "chats.cancel"; chatId: string };
 
 export type ClientToServer =
-  | AuthMessage
-  | PairMessage
   | ProjectsListMessage
   | ProjectsCreateMessage
   | ChatsListMessage

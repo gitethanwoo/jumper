@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Image,
   KeyboardAvoidingView,
   type NativeScrollEvent,
@@ -8,14 +9,16 @@ import {
 } from 'react-native';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import Feather from '@expo/vector-icons/Feather';
+import { Stack } from 'expo-router';
 import Markdown, { type MarkdownProps } from 'react-native-markdown-display';
 import * as ImagePicker from 'expo-image-picker';
 
 import { Pressable, ScrollView, Text, TextInput, View } from '@/tw';
 import { useBridge } from '@/lib/bridge/bridge-provider';
 import Colors from '@/constants/Colors';
-import { parseToolRuns } from '@/lib/bridge/tool-runs';
+import { parseToolRuns, parseTurnMessages } from '@/lib/bridge/tool-runs';
 import { ToolRunBlock } from '@/components/tool-run-block';
+import { useDrawer } from '@/lib/drawer-context';
 
 const AUTO_SCROLL_THRESHOLD = 72;
 
@@ -27,6 +30,7 @@ type PendingImage = {
 
 export default function ChatScreen() {
   const bridge = useBridge();
+  const drawer = useDrawer();
   const [draft, setDraft] = useState('');
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -52,14 +56,81 @@ export default function ChatScreen() {
     () => (draft.trim().length > 0 || pendingImage !== null) && !isUploadingImage,
     [draft, isUploadingImage, pendingImage]
   );
+
   const chatId = bridge.activeChatId;
+  const activeChat = useMemo(
+    () => bridge.allChats.find((chat) => chat.id === chatId) ?? null,
+    [bridge.allChats, chatId]
+  );
+  const activeProjectPath = useMemo(() => {
+    if (!activeChat) return null;
+    return bridge.projects.find((project) => project.id === activeChat.projectId)?.path ?? null;
+  }, [activeChat, bridge.projects]);
   const messages = chatId ? bridge.messagesByChatId[chatId] ?? [] : [];
   const events = chatId ? bridge.eventsByChatId[chatId] ?? [] : [];
+  const isChatResponding = chatId ? bridge.isRespondingByChatId[chatId] === true : false;
   const toolRuns = useMemo(() => parseToolRuns(events), [events]);
+  const turnMessages = useMemo(() => parseTurnMessages(events), [events]);
   const userMessages = useMemo(() => messages.filter((m) => m.role === 'user'), [messages]);
   const assistantMessages = useMemo(() => messages.filter((m) => m.role === 'assistant'), [messages]);
-  const turnCount = Math.max(userMessages.length, assistantMessages.length, toolRuns.length);
-  const lastAssistantLength = assistantMessages.at(-1)?.text.length ?? 0;
+  const toolRunsByTurn = useMemo(() => {
+    const grouped = new Map<number, typeof toolRuns>();
+    toolRuns.forEach((run) => {
+      const existing = grouped.get(run.turnIndex);
+      if (existing) {
+        grouped.set(run.turnIndex, [...existing, run]);
+        return;
+      }
+      grouped.set(run.turnIndex, [run]);
+    });
+    return grouped;
+  }, [toolRuns]);
+  const assistantTextByTurn = useMemo(() => {
+    const grouped = new Map<number, typeof turnMessages.assistant>();
+    turnMessages.assistant.forEach((entry) => {
+      const existing = grouped.get(entry.turnIndex);
+      if (existing) {
+        grouped.set(entry.turnIndex, [...existing, entry]);
+        return;
+      }
+      grouped.set(entry.turnIndex, [entry]);
+    });
+    return grouped;
+  }, [turnMessages.assistant]);
+  const userByTurn = useMemo(() => {
+    const grouped = new Map<number, (typeof turnMessages.users)[number]>();
+    turnMessages.users.forEach((entry) => {
+      if (!grouped.has(entry.turnIndex)) {
+        grouped.set(entry.turnIndex, entry);
+      }
+    });
+    return grouped;
+  }, [turnMessages.users]);
+  const maxTimelineTurnIndex = useMemo(() => {
+    let max = -1;
+    turnMessages.users.forEach((entry) => {
+      max = Math.max(max, entry.turnIndex);
+    });
+    turnMessages.assistant.forEach((entry) => {
+      max = Math.max(max, entry.turnIndex);
+    });
+    toolRuns.forEach((run) => {
+      max = Math.max(max, run.turnIndex);
+    });
+    return max;
+  }, [toolRuns, turnMessages.assistant, turnMessages.users]);
+  const hasEventTimeline = maxTimelineTurnIndex >= 0;
+  const turnCount = hasEventTimeline
+    ? maxTimelineTurnIndex + 1
+    : Math.max(userMessages.length, assistantMessages.length, toolRuns.length);
+  const lastRenderedAssistantLength = hasEventTimeline
+    ? turnMessages.assistant.at(-1)?.text.length ?? 0
+    : assistantMessages.at(-1)?.text.length ?? 0;
+  const timelineProgressKey = useMemo(
+    () =>
+      turnMessages.assistant.map((entry) => `${entry.turnIndex}:${entry.eventIndex}:${entry.text.length}`).join('|'),
+    [turnMessages.assistant]
+  );
   const toolProgressKey = useMemo(
     () =>
       toolRuns
@@ -71,7 +142,7 @@ export default function ChatScreen() {
         .join('|'),
     [toolRuns]
   );
-  const contentKey = `${messages.length}:${lastAssistantLength}:${toolProgressKey}`;
+  const contentKey = `${messages.length}:${lastRenderedAssistantLength}:${toolProgressKey}:${timelineProgressKey}`;
   const markdownStyle = useMemo<NonNullable<MarkdownProps['style']>>(
     () => ({
       body: {
@@ -233,6 +304,36 @@ export default function ChatScreen() {
     setShowJumpToLatest(false);
   }, []);
 
+  const handleSend = useCallback(() => {
+    const text = draft.trim();
+    if (!text && !pendingImage) return;
+    if (isUploadingImage) return;
+
+    if (!pendingImage) {
+      setDraft('');
+      bridge.sendToActiveChat(text);
+      scrollToLatest(true);
+      return;
+    }
+
+    setIsUploadingImage(true);
+    void bridge
+      .uploadImageForActiveChat({
+        uri: pendingImage.uri,
+        fileName: pendingImage.fileName,
+        mimeType: pendingImage.mimeType,
+      })
+      .then((attachment) => {
+        setDraft('');
+        setPendingImage(null);
+        bridge.sendToActiveChat(text, [attachment]);
+        scrollToLatest(true);
+      })
+      .finally(() => {
+        setIsUploadingImage(false);
+      });
+  }, [draft, pendingImage, isUploadingImage, bridge, scrollToLatest]);
+
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
@@ -284,56 +385,106 @@ export default function ChatScreen() {
   /* ── Empty state ── */
   if (!chatId) {
     return (
-      <View
-        style={{
-          flex: 1,
-          alignItems: 'center',
-          justifyContent: 'center',
-          paddingHorizontal: 40,
-          backgroundColor: palette.background,
-        }}
-      >
+      <>
+        <Stack.Screen
+          options={{
+            headerShadowVisible: false,
+            headerLeft: () => (
+              <Pressable
+                onPress={drawer.toggle}
+                style={{ width: 34, height: 34, alignItems: 'center', justifyContent: 'center' }}
+              >
+                <FontAwesome name="bars" size={18} color={palette.text} />
+              </Pressable>
+            ),
+            headerTitle: () => (
+              <View style={{ alignItems: 'center' }}>
+                <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700' }}>Chat</Text>
+                <Text
+                  numberOfLines={1}
+                  style={{ color: palette.textSubtle, fontSize: 11, lineHeight: 14, maxWidth: 220 }}
+                >
+                  {activeProjectPath ?? 'No folder selected'}
+                </Text>
+              </View>
+            ),
+          }}
+        />
         <View
           style={{
-            width: 64,
-            height: 64,
-            borderRadius: 16,
+            flex: 1,
             alignItems: 'center',
             justifyContent: 'center',
-            marginBottom: 16,
-            backgroundColor: palette.surface,
+            paddingHorizontal: 40,
+            backgroundColor: palette.background,
           }}
         >
-          <FontAwesome name="comments" size={26} color={colors.tint} />
+          <View
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 16,
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: 16,
+              backgroundColor: palette.surface,
+            }}
+          >
+            <FontAwesome name="comments" size={26} color={colors.tint} />
+          </View>
+          <Text
+            style={{
+              color: palette.text,
+              fontSize: 20,
+              fontWeight: '700',
+              textAlign: 'center',
+              marginBottom: 8,
+            }}
+          >
+            No Active Chat
+          </Text>
+          <Text
+            style={{
+              color: palette.textMuted,
+              fontSize: 15,
+              lineHeight: 24,
+              textAlign: 'center',
+            }}
+          >
+            Open the menu to start a conversation{'\n'}from any folder path.
+          </Text>
         </View>
-        <Text
-          style={{
-            color: palette.text,
-            fontSize: 20,
-            fontWeight: '700',
-            textAlign: 'center',
-            marginBottom: 8,
-          }}
-        >
-          No Active Chat
-        </Text>
-        <Text
-          style={{
-            color: palette.textMuted,
-            fontSize: 15,
-            lineHeight: 24,
-            textAlign: 'center',
-          }}
-        >
-          Head to Projects to create a project{'\n'}and start a conversation.
-        </Text>
-      </View>
+      </>
     );
   }
 
   /* ── Active chat ── */
   return (
     <View style={{ flex: 1, backgroundColor: palette.background }}>
+      <Stack.Screen
+        options={{
+          headerShadowVisible: false,
+          headerLeft: () => (
+            <Pressable
+              onPress={drawer.toggle}
+              style={{ width: 34, height: 34, alignItems: 'center', justifyContent: 'center' }}
+            >
+              <FontAwesome name="bars" size={18} color={palette.text} />
+            </Pressable>
+          ),
+          headerTitle: () => (
+            <View style={{ alignItems: 'center' }}>
+              <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700' }}>Chat</Text>
+              <Text
+                numberOfLines={1}
+                style={{ color: palette.textSubtle, fontSize: 11, lineHeight: 14, maxWidth: 220 }}
+              >
+                {activeProjectPath ?? 'No folder selected'}
+              </Text>
+            </View>
+          ),
+        }}
+      />
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -383,13 +534,60 @@ export default function ChatScreen() {
           </View>
 
           {Array.from({ length: turnCount }).map((_, index) => {
-            const user = userMessages[index];
-            const assistant = assistantMessages[index];
-            const run = toolRuns[index];
+            const runs = toolRunsByTurn.get(index) ?? [];
+            const turnUser = userByTurn.get(index);
+            const fallbackUser = userMessages[index];
+            const userText = turnUser?.text ?? fallbackUser?.text;
+            const assistantTurnTexts = assistantTextByTurn.get(index) ?? [];
+            const fallbackAssistant = assistantMessages[index];
+            const orderedItems = hasEventTimeline
+              ? [
+                  ...runs.map((run, runIndex) => ({
+                    key: `run:${runIndex}`,
+                    kind: 'run' as const,
+                    eventIndex: run.eventIndex,
+                    run,
+                  })),
+                  ...assistantTurnTexts.map((entry, textIndex) => ({
+                    key: `assistant:${textIndex}`,
+                    kind: 'assistant' as const,
+                    eventIndex: entry.eventIndex,
+                    text: entry.text,
+                  })),
+                ].sort((a, b) => {
+                  if (a.eventIndex !== b.eventIndex) return a.eventIndex - b.eventIndex;
+                  if (a.kind === b.kind) return 0;
+                  return a.kind === 'run' ? -1 : 1;
+                })
+              : [
+                  ...runs.map((run, runIndex) => ({
+                    key: `run:${runIndex}`,
+                    kind: 'run' as const,
+                    run,
+                  })),
+                  ...(fallbackAssistant
+                    ? [
+                        {
+                          key: 'assistant:0',
+                          kind: 'assistant' as const,
+                          text: fallbackAssistant.text,
+                        },
+                      ]
+                    : []),
+                ];
+            const hasAssistantInTurn = orderedItems.some((item) => item.kind === 'assistant');
+            const hasRunInTurn = orderedItems.some((item) => item.kind === 'run');
+            const isLatestTurn = index === turnCount - 1;
+            const shouldShowTurnLoading =
+              isLatestTurn &&
+              isChatResponding &&
+              !hasAssistantInTurn &&
+              !hasRunInTurn &&
+              Boolean(userText);
 
             return (
               <View key={`turn:${index}`} style={{ rowGap: 8 }}>
-                {user ? (
+                {userText ? (
                   <View
                     style={{
                       maxWidth: '85%',
@@ -404,16 +602,38 @@ export default function ChatScreen() {
                     }}
                   >
                     <Text selectable style={{ color: '#FFFFFF', fontSize: 15, lineHeight: 22 }}>
-                      {user.text}
+                      {userText}
                     </Text>
                   </View>
                 ) : null}
 
-                {run && run.tools.length > 0 ? <ToolRunBlock run={run} /> : null}
+                {orderedItems.map((item) =>
+                  item.kind === 'run' ? (
+                    <ToolRunBlock key={`turn:${index}:${item.key}`} run={item.run} />
+                  ) : (
+                    <View key={`turn:${index}:${item.key}`} style={{ width: '100%', paddingVertical: 4 }}>
+                      <Markdown style={markdownStyle}>{item.text}</Markdown>
+                    </View>
+                  )
+                )}
 
-                {assistant ? (
-                  <View style={{ width: '100%', paddingVertical: 4 }}>
-                    <Markdown style={markdownStyle}>{assistant.text}</Markdown>
+                {shouldShowTurnLoading ? (
+                  <View
+                    style={{
+                      alignSelf: 'flex-start',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      columnGap: 8,
+                      borderRadius: 14,
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      backgroundColor: palette.surface,
+                    }}
+                  >
+                    <ActivityIndicator size="small" color={colors.tint} />
+                    <Text style={{ color: palette.textMuted, fontSize: 13, fontWeight: '600' }}>
+                      Working...
+                    </Text>
                   </View>
                 ) : null}
               </View>
@@ -506,6 +726,8 @@ export default function ChatScreen() {
               selectionColor={colors.tint}
               keyboardAppearance="light"
               multiline
+              submitBehavior="submit"
+              onSubmitEditing={handleSend}
               style={{
                 color: palette.text,
                 maxHeight: 120,
@@ -539,32 +761,7 @@ export default function ChatScreen() {
               </Pressable>
               <Pressable
                 disabled={!canSend}
-                onPress={() => {
-                  const text = draft.trim();
-                  if (!pendingImage) {
-                    setDraft('');
-                    bridge.sendToActiveChat(text);
-                    scrollToLatest(true);
-                    return;
-                  }
-
-                  setIsUploadingImage(true);
-                  void bridge
-                    .uploadImageForActiveChat({
-                      uri: pendingImage.uri,
-                      fileName: pendingImage.fileName,
-                      mimeType: pendingImage.mimeType,
-                    })
-                    .then((attachment) => {
-                      setDraft('');
-                      setPendingImage(null);
-                      bridge.sendToActiveChat(text, [attachment]);
-                      scrollToLatest(true);
-                    })
-                    .finally(() => {
-                      setIsUploadingImage(false);
-                    });
-                }}
+                onPress={handleSend}
                 style={{
                   width: 36,
                   height: 36,

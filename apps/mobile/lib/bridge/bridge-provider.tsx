@@ -17,30 +17,21 @@ type Status = 'disconnected' | 'connecting' | 'connected';
 type BridgeState = {
   status: Status;
   serverUrl: string;
-  token: string | null;
 
   projects: Project[];
-  chats: Chat[];
+  allChats: Chat[];
 
-  activeProjectId: string | null;
   activeChatId: string | null;
 
   messagesByChatId: Record<string, ChatMessage[]>;
   eventsByChatId: Record<string, unknown[]>;
+  isRespondingByChatId: Record<string, boolean>;
 
   setServerUrl: (url: string) => Promise<void>;
-  clearToken: () => Promise<void>;
-  pair: (code: string, deviceName: string) => void;
-  connect: () => void;
-  disconnect: () => void;
+  handleConnectLink: (url: string) => Promise<boolean>;
 
-  listProjects: () => void;
-  createProject: (name: string) => void;
-
-  selectProject: (projectId: string) => void;
   selectChat: (chatId: string) => void;
-  listChats: (projectId: string) => void;
-  createChat: (projectId: string, title: string) => void;
+  startConversation: (folderPath: string) => void;
 
   uploadImageForActiveChat: (input: {
     uri: string;
@@ -52,6 +43,10 @@ type BridgeState = {
 };
 
 const BridgeContext = React.createContext<BridgeState | null>(null);
+
+type PendingConversation = {
+  title: string;
+};
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
@@ -106,22 +101,63 @@ function appendAssistantDelta(
   return { ...prev, [chatId]: [...msgs.slice(0, -1), updated] };
 }
 
+function normalizeFolderPath(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed === '/' || trimmed === '\\') return trimmed;
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  return normalized.length > 0 ? normalized : trimmed;
+}
+
+function basenameFromPath(folderPath: string): string {
+  const parts = folderPath.split(/[\\/]/).filter((part) => part.length > 0);
+  return parts.at(-1) ?? 'project';
+}
+
+function serverUrlFromConnectLink(url: string): string | null {
+  const parsed = new URL(url);
+  const target = parsed.hostname || parsed.pathname.replace(/^\//, '');
+  if (target !== 'connect') return null;
+  const server = parsed.searchParams.get('server');
+  if (!server || server.trim().length === 0) return null;
+  return server.trim();
+}
+
 export function BridgeProvider(props: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>('disconnected');
-  const [serverUrl, setServerUrlState] = useState('wss://');
-  const [token, setTokenState] = useState<string | null>(null);
+  const [serverUrl, setServerUrlState] = useState('ws://localhost:8787/ws');
+  const [initialized, setInitialized] = useState(false);
 
   const [projects, setProjects] = useState<Project[]>([]);
-  const [chats, setChats] = useState<Chat[]>([]);
+  const [allChats, setAllChats] = useState<Chat[]>([]);
 
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
 
   const [messagesByChatId, setMessagesByChatId] = useState<Record<string, ChatMessage[]>>({});
   const [eventsByChatId, setEventsByChatId] = useState<Record<string, unknown[]>>({});
+  const [isRespondingByChatId, setIsRespondingByChatId] = useState<Record<string, boolean>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const pendingRef = useRef<ClientToServer[]>([]);
+  const autoConnectAttemptedRef = useRef(false);
+  const pendingConversationsRef = useRef<PendingConversation[]>([]);
+  const reconnectAfterCloseRef = useRef(false);
+  const statusRef = useRef<Status>('disconnected');
+  const serverUrlRef = useRef('ws://localhost:8787/ws');
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  useEffect(() => {
+    serverUrlRef.current = serverUrl;
+  }, [serverUrl]);
+
+  const persistServerUrl = async (url: string) => {
+    setServerUrlState(url);
+    serverUrlRef.current = url;
+    await Store.setServerUrl(url);
+    ExtensionStore.setSharedBridgeServerUrl(url);
+  };
 
   const sendOrQueue = (msg: ClientToServer) => {
     const ws = wsRef.current;
@@ -133,31 +169,26 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   };
 
   const connect = () => {
-    if (status !== 'disconnected') return;
+    if (statusRef.current !== 'disconnected') return;
     setStatus('connecting');
+    statusRef.current = 'connecting';
 
-    const ws = new WebSocket(serverUrl);
+    const ws = new WebSocket(serverUrlRef.current);
     wsRef.current = ws;
 
     ws.onopen = () => {
       setStatus('connected');
+      statusRef.current = 'connected';
       const pending = pendingRef.current;
       pendingRef.current = [];
       for (const m of pending) ws.send(JSON.stringify(m));
-      if (token) sendOrQueue({ type: 'auth', token });
+      ws.send(JSON.stringify({ type: 'projects.list' } satisfies ClientToServer));
+      ws.send(JSON.stringify({ type: 'chats.list' } satisfies ClientToServer));
     };
 
     ws.onmessage = (evt) => {
       const raw: unknown = JSON.parse(String(evt.data));
       const msg = parseServerMessage(raw);
-
-      if (msg.type === 'paired') {
-        setTokenState(msg.token);
-        void Store.setToken(msg.token);
-        ExtensionStore.setSharedBridgeToken(msg.token);
-        sendOrQueue({ type: 'auth', token: msg.token });
-        return;
-      }
 
       if (msg.type === 'projects.list.result') {
         setProjects(msg.projects);
@@ -165,18 +196,31 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       }
 
       if (msg.type === 'projects.create.result') {
-        setProjects((prev) => [...prev, msg.project]);
+        setProjects((prev) => {
+          const withoutExisting = prev.filter((project) => project.id !== msg.project.id);
+          return [...withoutExisting, msg.project];
+        });
+
+        const pending = pendingConversationsRef.current[0];
+        if (pending) {
+          pendingConversationsRef.current = pendingConversationsRef.current.slice(1);
+          sendOrQueue({ type: 'chats.create', projectId: msg.project.id, title: pending.title });
+        }
         return;
       }
 
       if (msg.type === 'chats.list.result') {
-        setChats(msg.chats);
+        setAllChats(msg.chats);
         return;
       }
 
       if (msg.type === 'chats.create.result') {
-        setChats((prev) => [...prev, msg.chat]);
+        setAllChats((prev) => {
+          const withoutExisting = prev.filter((chat) => chat.id !== msg.chat.id);
+          return [...withoutExisting, msg.chat];
+        });
         setActiveChatId(msg.chat.id);
+        sendOrQueue({ type: 'chats.history', chatId: msg.chat.id });
         return;
       }
 
@@ -189,7 +233,6 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       if (msg.type === 'claude.event') {
         setEventsByChatId((prev) => pushEvent(prev, msg.chatId, msg.event));
 
-        // Best-effort text streaming: append text_delta to the current assistant message.
         const e = msg.event;
         if (isObject(e) && e.type === 'stream_event') {
           const inner = e.event;
@@ -207,6 +250,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       }
 
       if (msg.type === 'claude.done') {
+        setIsRespondingByChatId((prev) => ({ ...prev, [msg.chatId]: false }));
         setEventsByChatId((prev) =>
           pushEvent(prev, msg.chatId, {
             type: 'claude.done',
@@ -214,6 +258,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
             signal: msg.signal,
           })
         );
+        sendOrQueue({ type: 'chats.list' });
         return;
       }
 
@@ -225,6 +270,11 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     ws.onclose = () => {
       wsRef.current = null;
       setStatus('disconnected');
+      statusRef.current = 'disconnected';
+      if (reconnectAfterCloseRef.current) {
+        reconnectAfterCloseRef.current = false;
+        connect();
+      }
     };
 
     ws.onerror = () => {
@@ -233,28 +283,24 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   };
 
   const disconnect = () => {
+    reconnectAfterCloseRef.current = false;
     wsRef.current?.close();
   };
 
-  const pair = (code: string, deviceName: string) => {
-    if (status === 'disconnected') connect();
-    sendOrQueue({ type: 'pair', code, deviceName });
-  };
+  const handleConnectLink = async (url: string): Promise<boolean> => {
+    const nextServerUrl = serverUrlFromConnectLink(url);
+    if (!nextServerUrl) return false;
 
-  const clearToken = async () => {
-    disconnect();
-    setTokenState(null);
-    await Store.clearToken();
-    ExtensionStore.clearSharedBridgeToken();
-  };
+    await persistServerUrl(nextServerUrl);
 
-  const listProjects = () => sendOrQueue({ type: 'projects.list' });
-  const createProject = (name: string) => sendOrQueue({ type: 'projects.create', name });
+    if (statusRef.current === 'disconnected') {
+      connect();
+      return true;
+    }
 
-  const selectProject = (projectId: string) => {
-    setActiveProjectId(projectId);
-    setActiveChatId(null);
-    sendOrQueue({ type: 'chats.list', projectId });
+    reconnectAfterCloseRef.current = true;
+    wsRef.current?.close();
+    return true;
   };
 
   const selectChat = (chatId: string) => {
@@ -262,9 +308,22 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     sendOrQueue({ type: 'chats.history', chatId });
   };
 
-  const listChats = (projectId: string) => sendOrQueue({ type: 'chats.list', projectId });
-  const createChat = (projectId: string, title: string) =>
-    sendOrQueue({ type: 'chats.create', projectId, title });
+  const startConversation = (folderPath: string) => {
+    const path = normalizeFolderPath(folderPath);
+    if (path.length === 0) throw new Error('Folder path is required');
+
+    const projectName = basenameFromPath(path);
+    pendingConversationsRef.current = [
+      ...pendingConversationsRef.current,
+      { title: 'New conversation' },
+    ];
+
+    if (status === 'disconnected') {
+      connect();
+    }
+
+    sendOrQueue({ type: 'projects.create', name: projectName, path });
+  };
 
   const uploadImageForActiveChat = async (input: {
     uri: string;
@@ -273,7 +332,6 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   }) => {
     const chatId = activeChatId;
     if (!chatId) throw new Error('No active chat');
-    if (!token) throw new Error('Not authenticated');
 
     const base64 = await FileSystem.readAsStringAsync(input.uri, {
       encoding: FileSystem.EncodingType.Base64,
@@ -282,7 +340,6 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         chatId,
@@ -330,6 +387,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
         text: localText.length > 0 ? localText : '[Attached file]',
       })
     );
+    setIsRespondingByChatId((prev) => ({ ...prev, [chatId]: true }));
     sendOrQueue({
       type: 'chats.send',
       chatId,
@@ -341,6 +399,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const cancelActiveChat = () => {
     const chatId = activeChatId;
     if (!chatId) throw new Error('No active chat');
+    setIsRespondingByChatId((prev) => ({ ...prev, [chatId]: false }));
     sendOrQueue({ type: 'chats.cancel', chatId });
   };
 
@@ -348,13 +407,12 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     let cancelled = false;
 
     const run = async () => {
-      const [savedUrl, savedToken] = await Promise.all([Store.getServerUrl(), Store.getToken()]);
+      const savedUrl = await Store.getServerUrl();
       if (cancelled) return;
       if (savedUrl) {
-        setServerUrlState(savedUrl);
-        ExtensionStore.setSharedBridgeServerUrl(savedUrl);
+        await persistServerUrl(savedUrl);
       }
-      if (savedToken) setTokenState(savedToken);
+      setInitialized(true);
     };
 
     void run();
@@ -364,47 +422,28 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (token && status === 'disconnected') {
-      connect();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, serverUrl]);
-
-  useEffect(() => {
-    if (!token) {
-      ExtensionStore.clearSharedBridgeToken();
-      return;
-    }
-    ExtensionStore.setSharedBridgeToken(token);
-  }, [token]);
+    if (!initialized || autoConnectAttemptedRef.current) return;
+    autoConnectAttemptedRef.current = true;
+    connect();
+  }, [initialized, status, serverUrl]);
 
   const value: BridgeState = useMemo(
     () => ({
       status,
       serverUrl,
-      token,
       projects,
-      chats,
-      activeProjectId,
+      allChats,
       activeChatId,
       messagesByChatId,
       eventsByChatId,
+      isRespondingByChatId,
 
       setServerUrl: async (url: string) => {
-        setServerUrlState(url);
-        await Store.setServerUrl(url);
-        ExtensionStore.setSharedBridgeServerUrl(url);
+        await persistServerUrl(url);
       },
-      clearToken,
-      pair,
-      connect,
-      disconnect,
-      listProjects,
-      createProject,
-      selectProject,
+      handleConnectLink,
       selectChat,
-      listChats,
-      createChat,
+      startConversation,
       uploadImageForActiveChat,
       sendToActiveChat,
       cancelActiveChat,
@@ -412,13 +451,13 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     [
       status,
       serverUrl,
-      token,
       projects,
-      chats,
-      activeProjectId,
+      allChats,
       activeChatId,
       messagesByChatId,
       eventsByChatId,
+      isRespondingByChatId,
+      handleConnectLink,
     ]
   );
 

@@ -22,19 +22,15 @@ export type ChatAttachment = {
 };
 
 export type ClientToServer =
-  | { type: 'auth'; token: string }
-  | { type: 'pair'; code: string; deviceName: string }
   | { type: 'projects.list' }
-  | { type: 'projects.create'; name: string }
-  | { type: 'chats.list'; projectId: string }
+  | { type: 'projects.create'; name: string; path?: string }
+  | { type: 'chats.list'; projectId?: string }
   | { type: 'chats.create'; projectId: string; title: string }
   | { type: 'chats.history'; chatId: string }
   | { type: 'chats.send'; chatId: string; text: string; attachments?: ChatAttachment[] }
   | { type: 'chats.cancel'; chatId: string };
 
 export type ServerToClient =
-  | { type: 'authed'; serverVersion: string }
-  | { type: 'paired'; token: string }
   | { type: 'projects.list.result'; projects: Project[] }
   | { type: 'projects.create.result'; project: Project }
   | { type: 'chats.list.result'; chats: Chat[] }
