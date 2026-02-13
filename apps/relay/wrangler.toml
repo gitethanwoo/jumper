@@ -1,6 +1,11 @@
 name = "jumper-relay"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[routes]]
+pattern = "relay.jumper.sh"
+custom_domain = true
 
 [[durable_objects.bindings]]
 name = "RELAY_SESSION"
