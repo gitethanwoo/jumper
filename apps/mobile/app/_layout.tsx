@@ -73,6 +73,7 @@ function RootLayoutNav() {
             }}>
             <Stack.Screen name="index" />
             <Stack.Screen name="connect" options={{ headerShown: false }} />
+            <Stack.Screen name="pair" options={{ title: 'Pair' }} />
             <Stack.Screen name="settings" />
             <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
           </Stack>

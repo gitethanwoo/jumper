@@ -21,6 +21,49 @@ export type ChatAttachment = {
   sizeBytes: number;
 };
 
+export type RelayRole = 'bridge' | 'mobile';
+
+export type RelayRegisteredMessage = {
+  type: 'relay.registered';
+  code: string;
+  sessionId: string;
+};
+
+export type RelayPairedMessage = {
+  type: 'relay.paired';
+  sessionId: string;
+  sessionToken: string;
+  role: RelayRole;
+};
+
+export type RelayReconnectedMessage = {
+  type: 'relay.reconnected';
+  role: RelayRole;
+};
+
+export type RelayPeerConnectedMessage = {
+  type: 'relay.peer_connected';
+  peer: RelayRole;
+};
+
+export type RelayPeerDisconnectedMessage = {
+  type: 'relay.peer_disconnected';
+  peer: RelayRole;
+};
+
+export type RelayErrorMessage = {
+  type: 'relay.error';
+  message: string;
+};
+
+export type RelayControlMessage =
+  | RelayRegisteredMessage
+  | RelayPairedMessage
+  | RelayReconnectedMessage
+  | RelayPeerConnectedMessage
+  | RelayPeerDisconnectedMessage
+  | RelayErrorMessage;
+
 export type ClientToServer =
   | { type: 'projects.list' }
   | { type: 'projects.create'; name: string; path?: string }
@@ -28,7 +71,8 @@ export type ClientToServer =
   | { type: 'chats.create'; projectId: string; title: string }
   | { type: 'chats.history'; chatId: string }
   | { type: 'chats.send'; chatId: string; text: string; attachments?: ChatAttachment[] }
-  | { type: 'chats.cancel'; chatId: string };
+  | { type: 'chats.cancel'; chatId: string }
+  | { type: 'upload-image'; chatId: string; fileName: string; mimeType: string; base64: string };
 
 export type ServerToClient =
   | { type: 'projects.list.result'; projects: Project[] }
@@ -38,6 +82,7 @@ export type ServerToClient =
   | { type: 'chats.history.result'; chatId: string; messages: ChatMessage[]; events: unknown[] }
   | { type: 'claude.event'; chatId: string; event: unknown }
   | { type: 'claude.done'; chatId: string; exitCode: number | null; signal: string | null }
+  | { type: 'upload-image.result'; attachment: ChatAttachment }
   | { type: 'error'; message: string };
 
 export type ChatMessage = {
