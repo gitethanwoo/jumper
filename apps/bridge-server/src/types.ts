@@ -107,6 +107,12 @@ export type ClaudeDone = {
   signal: NodeJS.Signals | null;
 };
 
+export type ChatsCancelResult = {
+  type: "chats.cancel.result";
+  chatId: string;
+  accepted: boolean;
+};
+
 export type UploadImageResult = {
   type: "upload-image.result";
   attachment: ChatAttachment;
@@ -140,6 +146,7 @@ export type ServerToClient =
   | ChatsHistoryResult
   | ClaudeEvent
   | ClaudeDone
+  | ChatsCancelResult
   | UploadImageResult
   | FoldersListResult
   | ErrorMessage;

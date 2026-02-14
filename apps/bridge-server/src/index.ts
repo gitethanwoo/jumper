@@ -813,6 +813,7 @@ async function main() {
   });
 
   const active = new Map<string, ReturnType<typeof spawn>>();
+  const cancelTimers = new Map<string, NodeJS.Timeout>();
 
   let state: State = await loadState();
   state = await normalizeStateProjectPaths(state);
@@ -892,7 +893,20 @@ async function main() {
 
     if (msg.type === "chats.cancel") {
       const child = active.get(msg.chatId);
-      if (child) child.kill("SIGINT");
+      if (!child) {
+        reply({ type: "chats.cancel.result", chatId: msg.chatId, accepted: false });
+        return;
+      }
+
+      child.kill("SIGINT");
+      reply({ type: "chats.cancel.result", chatId: msg.chatId, accepted: true });
+      const existingTimer = cancelTimers.get(msg.chatId);
+      if (existingTimer) clearTimeout(existingTimer);
+      const timer = setTimeout(() => {
+        if (active.get(msg.chatId) !== child) return;
+        child.kill("SIGKILL");
+      }, 2000);
+      cancelTimers.set(msg.chatId, timer);
       return;
     }
 
@@ -1003,6 +1017,11 @@ async function main() {
 
       child.on("exit", (exitCode, signal) => {
         active.delete(chat.id);
+        const cancelTimer = cancelTimers.get(chat.id);
+        if (cancelTimer) {
+          clearTimeout(cancelTimer);
+          cancelTimers.delete(chat.id);
+        }
         rlOut.close();
         rlErr.close();
         reply({ type: "claude.done", chatId: chat.id, exitCode, signal });

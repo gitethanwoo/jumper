@@ -102,6 +102,7 @@ export type ServerToClient =
   | { type: 'chats.history.result'; chatId: string; messages: ChatMessage[]; events: unknown[] }
   | { type: 'claude.event'; chatId: string; event: unknown }
   | { type: 'claude.done'; chatId: string; exitCode: number | null; signal: string | null }
+  | { type: 'chats.cancel.result'; chatId: string; accepted: boolean }
   | { type: 'upload-image.result'; attachment: ChatAttachment }
   | {
       type: 'folders.list.result';
