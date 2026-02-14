@@ -1,5 +1,5 @@
 {
-  "name": "cc-bridge",
+  "name": "jumper-workspace",
   "private": true,
   "packageManager": "pnpm@10.17.1",
   "scripts": {
@@ -9,6 +9,7 @@
     "dev:server": "pnpm -C apps/bridge-server dev"
   },
   "dependencies": {
-    "@bacons/apple-targets": "^4.0.2"
+    "@bacons/apple-targets": "^4.0.2",
+    "expo-dev-client": "~55.0.5"
   }
 }
