@@ -71,7 +71,7 @@ function RootLayoutNav() {
                 fontSize: 17,
               },
             }}>
-            <Stack.Screen name="index" />
+            <Stack.Screen name="index" options={{ title: 'Home' }} />
             <Stack.Screen name="connect" options={{ headerShown: false }} />
             <Stack.Screen name="pair" options={{ title: 'Pair' }} />
             <Stack.Screen name="settings" />

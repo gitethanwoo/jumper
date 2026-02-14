@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  PanResponder,
   Image,
   KeyboardAvoidingView,
   type NativeScrollEvent,
@@ -21,6 +22,9 @@ import { ToolRunBlock } from '@/components/tool-run-block';
 import { useDrawer } from '@/lib/drawer-context';
 
 const AUTO_SCROLL_THRESHOLD = 72;
+const EDGE_SWIPE_WIDTH = 28;
+const DRAWER_OPEN_SWIPE_DX = 56;
+const DRAWER_OPEN_MAX_DY = 28;
 
 type PendingImage = {
   uri: string;
@@ -316,6 +320,24 @@ export default function ChatScreen() {
       borderColor: 'rgba(0,0,0,0.06)',
     }),
     []
+  );
+  const edgeSwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponderCapture: (event, gestureState) => {
+          if (drawer.isOpen) return false;
+          if (gestureState.dx <= 10) return false;
+          if (Math.abs(gestureState.dy) > 14) return false;
+          const startX = event.nativeEvent.pageX - gestureState.dx;
+          return startX <= EDGE_SWIPE_WIDTH;
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          if (gestureState.dx < DRAWER_OPEN_SWIPE_DX) return;
+          if (Math.abs(gestureState.dy) > DRAWER_OPEN_MAX_DY) return;
+          drawer.open();
+        },
+      }),
+    [drawer]
   );
 
   const pickImage = useCallback(async () => {
@@ -1059,7 +1081,7 @@ export default function ChatScreen() {
 
   /* ── Active chat ── */
   return (
-    <View style={{ flex: 1, backgroundColor: palette.background }}>
+    <View style={{ flex: 1, backgroundColor: palette.background }} {...edgeSwipeResponder.panHandlers}>
       <Stack.Screen
         options={{
           headerShadowVisible: false,
