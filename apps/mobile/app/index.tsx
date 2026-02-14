@@ -50,6 +50,7 @@ export default function ChatScreen() {
   const [browserSuggestedRoots, setBrowserSuggestedRoots] = useState<string[]>([]);
   const [resumeFolders, setResumeFolders] = useState<ResumeFolder[]>([]);
   const [isBrowserLoading, setIsBrowserLoading] = useState(false);
+  const [isPathInputVisible, setIsPathInputVisible] = useState(false);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true);
@@ -69,11 +70,8 @@ export default function ChatScreen() {
   );
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView> | null>(null);
   const prevContentKeyRef = useRef<string | null>(null);
-
-  const canSend = useMemo(
-    () => (draft.trim().length > 0 || pendingImage !== null) && !isUploadingImage,
-    [draft, isUploadingImage, pendingImage]
-  );
+  const trimmedDraft = draft.trim();
+  const isStopCommand = trimmedDraft === 'stop' || trimmedDraft === '/stop';
 
   const chatId = bridge.activeChatId;
   const activeChat = useMemo(
@@ -102,6 +100,16 @@ export default function ChatScreen() {
   const messages = chatId ? bridge.messagesByChatId[chatId] ?? [] : [];
   const events = chatId ? bridge.eventsByChatId[chatId] ?? [] : [];
   const isChatResponding = chatId ? bridge.isRespondingByChatId[chatId] === true : false;
+  const isChatStopping = chatId ? bridge.isStoppingByChatId[chatId] === true : false;
+  const canSendMessage =
+    (trimmedDraft.length > 0 || pendingImage !== null) && !isUploadingImage && !isChatResponding;
+  const canSendStopCommand =
+    isChatResponding &&
+    !isChatStopping &&
+    !isUploadingImage &&
+    pendingImage === null &&
+    isStopCommand;
+  const canSend = canSendMessage || canSendStopCommand;
   const toolRuns = useMemo(() => parseToolRuns(events), [events]);
   const turnMessages = useMemo(() => parseTurnMessages(events), [events]);
   const userMessages = useMemo(() => messages.filter((m) => m.role === 'user'), [messages]);
@@ -339,8 +347,17 @@ export default function ChatScreen() {
 
   const handleSend = useCallback(() => {
     const text = draft.trim();
-    if (!text && !pendingImage) return;
     if (isUploadingImage) return;
+    if (isChatResponding) {
+      if (text === 'stop' || text === '/stop') {
+        const interrupted = bridge.interruptActiveChat();
+        if (interrupted) {
+          setDraft('');
+        }
+      }
+      return;
+    }
+    if (!text && !pendingImage) return;
 
     if (!pendingImage) {
       setDraft('');
@@ -365,7 +382,14 @@ export default function ChatScreen() {
       .finally(() => {
         setIsUploadingImage(false);
       });
-  }, [draft, pendingImage, isUploadingImage, bridge, scrollToLatest]);
+  }, [draft, pendingImage, isUploadingImage, isChatResponding, bridge, scrollToLatest]);
+
+  const handleStop = useCallback(() => {
+    const interrupted = bridge.interruptActiveChat();
+    if (interrupted && isStopCommand) {
+      setDraft('');
+    }
+  }, [bridge, isStopCommand]);
 
   const handleStartFromPath = useCallback(() => {
     const folderPath = starterFolderPath.trim();
@@ -466,23 +490,18 @@ export default function ChatScreen() {
         <Stack.Screen
           options={{
             headerShadowVisible: false,
+            headerStyle: { backgroundColor: '#FAF9F5' },
             headerLeft: () => (
               <Pressable
                 onPress={drawer.toggle}
                 style={{ width: 34, height: 34, alignItems: 'center', justifyContent: 'center' }}
               >
-                <FontAwesome name="bars" size={18} color={palette.text} />
+                <FontAwesome name="bars" size={18} color={palette.textMuted} />
               </Pressable>
             ),
             headerTitle: () => (
               <View style={{ alignItems: 'center' }}>
-                <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700' }}>Chat</Text>
-                <Text
-                  numberOfLines={1}
-                  style={{ color: palette.textSubtle, fontSize: 11, lineHeight: 14, maxWidth: 220 }}
-                >
-                  {activeProjectPath ?? 'No folder selected'}
-                </Text>
+                <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700', letterSpacing: -0.3 }}>Claude</Text>
               </View>
             ),
           }}
@@ -490,67 +509,78 @@ export default function ChatScreen() {
         <ScrollView
           style={{ flex: 1, backgroundColor: palette.background }}
           contentInsetAdjustmentBehavior="automatic"
-          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 28, rowGap: 12 }}
+          contentContainerStyle={{ paddingBottom: 40 }}
         >
+          {/* ── Hero section ── */}
           <View
             style={{
-              borderRadius: 18,
-              borderWidth: 1,
-              borderColor: palette.border,
-              backgroundColor: '#FFFFFF',
-              paddingHorizontal: 16,
-              paddingVertical: 16,
-              rowGap: 10,
+              backgroundColor: '#FAF9F5',
+              paddingHorizontal: 24,
+              paddingTop: 32,
+              paddingBottom: 36,
+              alignItems: 'center',
+              borderBottomWidth: 1,
+              borderBottomColor: 'rgba(0,0,0,0.05)',
             }}
           >
             <View
               style={{
-                width: 48,
-                height: 48,
-                borderRadius: 12,
+                width: 56,
+                height: 56,
+                borderRadius: 16,
                 alignItems: 'center',
                 justifyContent: 'center',
-                backgroundColor: palette.surface,
+                backgroundColor: '#FEF3C7',
+                marginBottom: 16,
               }}
             >
-              <FontAwesome name="folder-open" size={20} color={colors.tint} />
+              <FontAwesome name="terminal" size={22} color="#B45309" />
             </View>
             <Text
               style={{
                 color: palette.text,
-                fontSize: 22,
-                fontWeight: '700',
+                fontSize: 28,
+                fontWeight: '800',
+                letterSpacing: -0.8,
+                textAlign: 'center',
+                marginBottom: 8,
               }}
             >
-              {isBridgeConnected ? 'Start a Claude session' : isBridgeConnecting ? 'Connecting to your Mac...' : 'Connect your Mac first'}
+              {isBridgeConnected
+                ? "Start Jumpin'"
+                : isBridgeConnecting
+                  ? 'Connecting...'
+                  : 'Connect your Mac'}
             </Text>
             <Text
               style={{
                 color: palette.textMuted,
                 fontSize: 15,
                 lineHeight: 22,
+                textAlign: 'center',
+                maxWidth: 280,
+                marginBottom: 16,
               }}
             >
               {isBridgeConnected
-                ? 'Choose a folder to begin, or jump into an existing conversation.'
-                : 'Run npx jumper-app on your Mac, then scan the QR code to finish setup.'}
+                ? 'Pick a folder on your Mac to start working with Claude.'
+                : 'Run npx jumper-app on your Mac, then scan the QR code.'}
             </Text>
             <View
               style={{
-                alignSelf: 'flex-start',
                 flexDirection: 'row',
                 alignItems: 'center',
                 columnGap: 6,
-                paddingHorizontal: 10,
-                paddingVertical: 5,
+                paddingHorizontal: 12,
+                paddingVertical: 6,
                 borderRadius: 999,
-                backgroundColor: '#F5F5F4',
+                backgroundColor: 'rgba(0,0,0,0.04)',
               }}
             >
               <View
                 style={{
-                  width: 6,
-                  height: 6,
+                  width: 7,
+                  height: 7,
                   borderRadius: 999,
                   backgroundColor: isBridgeConnected ? '#0D9488' : isBridgeConnecting ? '#D97706' : '#DC2626',
                 }}
@@ -559,216 +589,296 @@ export default function ChatScreen() {
                 {isBridgeConnected ? 'Connected' : isBridgeConnecting ? 'Connecting' : 'Not connected'}
               </Text>
             </View>
-            {!isBridgeConnected ? (
+            {!isBridgeConnected && !isBridgeConnecting ? (
               <Pressable
-                onPress={() => {
-                  router.navigate('/settings');
-                }}
+                onPress={() => router.navigate('/settings')}
                 style={{
-                  height: 40,
+                  marginTop: 16,
+                  height: 44,
+                  paddingHorizontal: 28,
                   borderRadius: 12,
                   alignItems: 'center',
                   justifyContent: 'center',
                   backgroundColor: '#1C1917',
                 }}
               >
-                <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '700' }}>Open Setup</Text>
+                <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Open Setup</Text>
               </Pressable>
             ) : null}
           </View>
 
-          <View
-            style={{
-              borderRadius: 18,
-              borderWidth: 1,
-              borderColor: palette.border,
-              backgroundColor: '#FFFFFF',
-              paddingHorizontal: 16,
-              paddingVertical: 14,
-              rowGap: 10,
-            }}
-          >
-            <Text
-              style={{
-                color: palette.text,
-                fontSize: 12,
-                fontWeight: '700',
-                letterSpacing: 0.6,
-                textTransform: 'uppercase',
-              }}
-            >
-              Folder Path
-            </Text>
-            <TextInput
-              value={starterFolderPath}
-              onChangeText={setStarterFolderPath}
-              placeholder="~/dev/project"
-              placeholderTextColor={palette.textSubtle}
-              autoCapitalize="none"
-              autoCorrect={false}
-              className="h-[44px] rounded-xl px-4 bg-sf-bg text-sf-text text-[15px] border border-sf-sep"
-            />
-            <Text
-              style={{
-                color: palette.textMuted,
-                fontSize: 12,
-                lineHeight: 18,
-              }}
-            >
-              {isBridgeConnected
-                ? 'Enter a folder path on your Mac. `~/...` is supported.'
-                : 'Connect your Mac first. Then browse folders or enter a path.'}
-            </Text>
-            <Pressable
-              onPress={openFolderBrowser}
-              disabled={!isBridgeConnected}
-              style={{
-                height: 40,
-                borderRadius: 12,
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderWidth: 1,
-                borderColor: palette.border,
-                backgroundColor: isBridgeConnected ? '#F8F7F5' : '#F1F5F9',
-              }}
-            >
-              <Text style={{ color: isBridgeConnected ? palette.text : palette.textSubtle, fontSize: 14, fontWeight: '600' }}>
-                Browse Mac Folders
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={handleStartFromPath}
-              disabled={!canStartFromPath || !isBridgeConnected}
-              style={{
-                height: 44,
-                borderRadius: 12,
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: canStartFromPath && isBridgeConnected ? '#1C1917' : '#D6D3D1',
-              }}
-            >
-              <Text
+          {/* ── Action cards ── */}
+          {isBridgeConnected ? (
+            <View style={{ paddingHorizontal: 16, paddingTop: 20, rowGap: 10 }}>
+              {/* Browse folders card */}
+              <Pressable
+                onPress={openFolderBrowser}
                 style={{
-                  color: canStartFromPath && isBridgeConnected ? '#FFFFFF' : '#78716C',
-                  fontSize: 15,
-                  fontWeight: '700',
+                  borderRadius: 16,
+                  backgroundColor: '#FFFFFF',
+                  borderWidth: 1,
+                  borderColor: palette.border,
+                  paddingHorizontal: 18,
+                  paddingVertical: 18,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  columnGap: 14,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.04,
+                  shadowRadius: 8,
                 }}
               >
-                Start From Folder
+                <View
+                  style={{
+                    width: 44,
+                    height: 44,
+                    borderRadius: 12,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: '#FEF3C7',
+                  }}
+                >
+                  <FontAwesome name="folder-open" size={18} color="#B45309" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: palette.text, fontSize: 16, fontWeight: '700', marginBottom: 2 }}>
+                    Browse Folders
+                  </Text>
+                  <Text style={{ color: palette.textMuted, fontSize: 13 }}>
+                    Navigate your Mac file system
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={18} color={palette.textSubtle} />
+              </Pressable>
+
+              {/* Type a path card */}
+              <Pressable
+                onPress={() => setIsPathInputVisible(!isPathInputVisible)}
+                style={{
+                  borderRadius: 16,
+                  backgroundColor: '#FFFFFF',
+                  borderWidth: 1,
+                  borderColor: isPathInputVisible ? 'rgba(180,83,9,0.25)' : palette.border,
+                  paddingHorizontal: 18,
+                  paddingVertical: 18,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.04,
+                  shadowRadius: 8,
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 14 }}>
+                  <View
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 12,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: '#F0EDE9',
+                    }}
+                  >
+                    <Feather name="edit-3" size={18} color="#57534E" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: palette.text, fontSize: 16, fontWeight: '700', marginBottom: 2 }}>
+                      Type a Path
+                    </Text>
+                    <Text style={{ color: palette.textMuted, fontSize: 13 }}>
+                      Enter a folder path directly
+                    </Text>
+                  </View>
+                  <Feather
+                    name={isPathInputVisible ? 'chevron-up' : 'chevron-down'}
+                    size={18}
+                    color={palette.textSubtle}
+                  />
+                </View>
+                {isPathInputVisible ? (
+                  <View style={{ marginTop: 14, rowGap: 10 }}>
+                    <TextInput
+                      value={starterFolderPath}
+                      onChangeText={setStarterFolderPath}
+                      placeholder="~/dev/my-project"
+                      placeholderTextColor={palette.textSubtle}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      autoFocus
+                      style={{
+                        height: 46,
+                        borderRadius: 12,
+                        paddingHorizontal: 14,
+                        backgroundColor: '#F5F5F4',
+                        color: palette.text,
+                        fontSize: 15,
+                        fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+                      }}
+                    />
+                    <Pressable
+                      onPress={handleStartFromPath}
+                      disabled={!canStartFromPath}
+                      style={{
+                        height: 44,
+                        borderRadius: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: canStartFromPath ? '#B45309' : '#E7E5E4',
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: canStartFromPath ? '#FFFFFF' : '#A8A29E',
+                          fontSize: 15,
+                          fontWeight: '700',
+                        }}
+                      >
+                        Start Session
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </Pressable>
+            </View>
+          ) : null}
+
+          {/* ── Resume section ── */}
+          {resumeFolders.length > 0 ? (
+            <View style={{ paddingHorizontal: 16, paddingTop: 24 }}>
+              <Text
+                style={{
+                  color: palette.textMuted,
+                  fontSize: 12,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  textTransform: 'uppercase',
+                  marginBottom: 10,
+                  paddingHorizontal: 2,
+                }}
+              >
+                Pick up where you left off
+              </Text>
+              <View style={{ rowGap: 6 }}>
+                {resumeFolders.map((folder) => (
+                  <Pressable
+                    key={folder.path}
+                    onPress={() => bridge.startConversation(folder.path)}
+                    style={{
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: palette.border,
+                      backgroundColor: '#FFFFFF',
+                      paddingHorizontal: 16,
+                      paddingVertical: 14,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      columnGap: 12,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 10,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: '#EDE9FE',
+                      }}
+                    >
+                      <Feather name="rotate-ccw" size={15} color="#7C3AED" />
+                    </View>
+                    <View style={{ flex: 1, rowGap: 2 }}>
+                      <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
+                        {folder.path.split('/').pop() || folder.path}
+                      </Text>
+                      <Text numberOfLines={1} style={{ color: palette.textSubtle, fontSize: 12 }}>
+                        {folder.conversationCount} conversation{folder.conversationCount !== 1 ? 's' : ''} &middot; {folder.path}
+                      </Text>
+                    </View>
+                    <Feather name="chevron-right" size={16} color={palette.textSubtle} />
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          ) : null}
+
+          {/* ── Recent conversations ── */}
+          {recentChats.length > 0 ? (
+            <View style={{ paddingHorizontal: 16, paddingTop: 24 }}>
+              <Text
+                style={{
+                  color: palette.textMuted,
+                  fontSize: 12,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  textTransform: 'uppercase',
+                  marginBottom: 10,
+                  paddingHorizontal: 2,
+                }}
+              >
+                Recent conversations
+              </Text>
+              <View style={{ rowGap: 6 }}>
+                {recentChats.map((chat) => (
+                  <Pressable
+                    key={chat.id}
+                    onPress={() => bridge.selectChat(chat.id)}
+                    style={{
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: palette.border,
+                      backgroundColor: '#FFFFFF',
+                      paddingHorizontal: 16,
+                      paddingVertical: 14,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      columnGap: 12,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 10,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: '#FFF7ED',
+                      }}
+                    >
+                      <Feather name="message-circle" size={15} color="#B45309" />
+                    </View>
+                    <View style={{ flex: 1, rowGap: 2 }}>
+                      <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
+                        {chat.title}
+                      </Text>
+                      <Text numberOfLines={1} style={{ color: palette.textSubtle, fontSize: 12 }}>
+                        {projectById[chat.projectId]?.path ?? 'Unknown folder'}
+                      </Text>
+                    </View>
+                    <Feather name="chevron-right" size={16} color={palette.textSubtle} />
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          ) : null}
+
+          {/* ── Full menu link ── */}
+          <View style={{ paddingHorizontal: 16, paddingTop: 20 }}>
+            <Pressable
+              onPress={drawer.open}
+              style={{
+                height: 44,
+                borderRadius: 14,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: palette.surface,
+              }}
+            >
+              <Text style={{ color: palette.textMuted, fontSize: 13, fontWeight: '600' }}>
+                All Conversations
               </Text>
             </Pressable>
           </View>
-
-          {resumeFolders.length > 0 ? (
-            <View
-              style={{
-                borderRadius: 18,
-                borderWidth: 1,
-                borderColor: palette.border,
-                backgroundColor: '#FFFFFF',
-                paddingHorizontal: 16,
-                paddingVertical: 14,
-                rowGap: 8,
-              }}
-            >
-              <Text
-                style={{
-                  color: palette.text,
-                  fontSize: 12,
-                  fontWeight: '700',
-                  letterSpacing: 0.6,
-                  textTransform: 'uppercase',
-                }}
-              >
-                Pick Up Where You Left Off
-              </Text>
-              {resumeFolders.map((folder) => (
-                <Pressable
-                  key={folder.path}
-                  onPress={() => bridge.startConversation(folder.path)}
-                  style={{
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: 'rgba(0,0,0,0.06)',
-                    backgroundColor: '#FAFAF9',
-                    paddingHorizontal: 12,
-                    paddingVertical: 10,
-                    rowGap: 3,
-                  }}
-                >
-                  <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
-                    {folder.path}
-                  </Text>
-                  <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
-                    {folder.conversationCount} previous conversations
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-
-          {recentChats.length > 0 ? (
-            <View
-              style={{
-                borderRadius: 18,
-                borderWidth: 1,
-                borderColor: palette.border,
-                backgroundColor: '#FFFFFF',
-                paddingHorizontal: 16,
-                paddingVertical: 14,
-                rowGap: 8,
-              }}
-            >
-              <Text
-                style={{
-                  color: palette.text,
-                  fontSize: 12,
-                  fontWeight: '700',
-                  letterSpacing: 0.6,
-                  textTransform: 'uppercase',
-                }}
-              >
-                Recent Conversations
-              </Text>
-              {recentChats.map((chat) => (
-                <Pressable
-                  key={chat.id}
-                  onPress={() => bridge.selectChat(chat.id)}
-                  style={{
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: 'rgba(0,0,0,0.06)',
-                    backgroundColor: '#FAFAF9',
-                    paddingHorizontal: 12,
-                    paddingVertical: 10,
-                    rowGap: 3,
-                  }}
-                >
-                  <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
-                    {chat.title}
-                  </Text>
-                  <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
-                    {projectById[chat.projectId]?.path ?? 'Unknown folder'}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-
-          <Pressable
-            onPress={drawer.open}
-            style={{
-              height: 42,
-              borderRadius: 16,
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderWidth: 1,
-              borderColor: palette.border,
-              backgroundColor: '#FFFFFF',
-            }}
-          >
-            <Text style={{ color: palette.textMuted, fontSize: 13, fontWeight: '600' }}>Open Full Menu</Text>
-          </Pressable>
         </ScrollView>
         {isFolderBrowserOpen ? (
           <View
@@ -1121,7 +1231,7 @@ export default function ChatScreen() {
                   >
                     <ActivityIndicator size="small" color={colors.tint} />
                     <Text style={{ color: palette.textMuted, fontSize: 13, fontWeight: '600' }}>
-                      Working...
+                      {isChatStopping ? 'Stopping...' : 'Working...'}
                     </Text>
                   </View>
                 ) : null}
@@ -1249,21 +1359,36 @@ export default function ChatScreen() {
                 />
               </Pressable>
               <Pressable
-                disabled={!canSend}
-                onPress={handleSend}
+                disabled={isChatResponding ? isChatStopping : !canSend}
+                onPress={isChatResponding ? handleStop : handleSend}
                 style={{
                   width: 36,
                   height: 36,
                   borderRadius: 999,
                   alignItems: 'center',
                   justifyContent: 'center',
-                  backgroundColor: canSend ? '#B45309' : palette.surfaceStrong,
+                  backgroundColor:
+                    isChatResponding
+                      ? isChatStopping
+                        ? palette.surfaceStrong
+                        : '#B45309'
+                      : canSend
+                        ? '#B45309'
+                        : palette.surfaceStrong,
                 }}
               >
                 <Feather
-                  name="arrow-up"
+                  name={isChatResponding ? 'square' : 'arrow-up'}
                   size={18}
-                  color={canSend ? '#FFFFFF' : colors.tabIconDefault}
+                  color={
+                    isChatResponding
+                      ? isChatStopping
+                        ? colors.tabIconDefault
+                        : '#FFFFFF'
+                      : canSend
+                        ? '#FFFFFF'
+                        : colors.tabIconDefault
+                  }
                 />
               </Pressable>
             </View>

@@ -32,6 +32,7 @@ type BridgeState = {
   messagesByChatId: Record<string, ChatMessage[]>;
   eventsByChatId: Record<string, unknown[]>;
   isRespondingByChatId: Record<string, boolean>;
+  isStoppingByChatId: Record<string, boolean>;
 
   setServerUrl: (url: string) => Promise<void>;
   handleConnectLink: (url: string) => Promise<boolean>;
@@ -39,6 +40,7 @@ type BridgeState = {
   disconnectRelay: () => Promise<void>;
 
   selectChat: (chatId: string) => void;
+  deselectChat: () => void;
   startConversation: (folderPath: string) => void;
   listFolders: (path?: string) => Promise<FolderListResult>;
 
@@ -48,7 +50,8 @@ type BridgeState = {
     mimeType: string;
   }) => Promise<ChatAttachment>;
   sendToActiveChat: (text: string, attachments?: ChatAttachment[]) => void;
-  cancelActiveChat: () => void;
+  interruptActiveChat: () => boolean;
+  cancelActiveChat: () => boolean;
 };
 
 const BridgeContext = React.createContext<BridgeState | null>(null);
@@ -187,6 +190,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const [messagesByChatId, setMessagesByChatId] = useState<Record<string, ChatMessage[]>>({});
   const [eventsByChatId, setEventsByChatId] = useState<Record<string, unknown[]>>({});
   const [isRespondingByChatId, setIsRespondingByChatId] = useState<Record<string, boolean>>({});
+  const [isStoppingByChatId, setIsStoppingByChatId] = useState<Record<string, boolean>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const pendingRef = useRef<ClientToServer[]>([]);
@@ -331,6 +335,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
 
     if (msg.type === 'claude.done') {
       setIsRespondingByChatId((prev) => ({ ...prev, [msg.chatId]: false }));
+      setIsStoppingByChatId((prev) => ({ ...prev, [msg.chatId]: false }));
       setEventsByChatId((prev) =>
         pushEvent(prev, msg.chatId, {
           type: 'claude.done',
@@ -339,6 +344,11 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
         })
       );
       sendOrQueue({ type: 'chats.list' });
+      return;
+    }
+
+    if (msg.type === 'chats.cancel.result') {
+      setIsStoppingByChatId((prev) => ({ ...prev, [msg.chatId]: msg.accepted }));
       return;
     }
 
@@ -502,6 +512,10 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     sendOrQueue({ type: 'chats.history', chatId });
   };
 
+  const deselectChat = () => {
+    setActiveChatId(null);
+  };
+
   const startConversation = (folderPath: string) => {
     const path = normalizeFolderPath(folderPath);
     if (path.length === 0) throw new Error('Folder path is required');
@@ -646,6 +660,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       })
     );
     setIsRespondingByChatId((prev) => ({ ...prev, [chatId]: true }));
+    setIsStoppingByChatId((prev) => ({ ...prev, [chatId]: false }));
     sendOrQueue({
       type: 'chats.send',
       chatId,
@@ -654,12 +669,16 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     });
   };
 
-  const cancelActiveChat = () => {
+  const interruptActiveChat = () => {
     const chatId = activeChatId;
     if (!chatId) throw new Error('No active chat');
-    setIsRespondingByChatId((prev) => ({ ...prev, [chatId]: false }));
+    if (isRespondingByChatId[chatId] !== true) return false;
+    if (isStoppingByChatId[chatId] === true) return true;
+    setIsStoppingByChatId((prev) => ({ ...prev, [chatId]: true }));
     sendOrQueue({ type: 'chats.cancel', chatId });
+    return true;
   };
+  const cancelActiveChat = interruptActiveChat;
 
   useEffect(() => {
     let cancelled = false;
@@ -713,6 +732,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       messagesByChatId,
       eventsByChatId,
       isRespondingByChatId,
+      isStoppingByChatId,
 
       setServerUrl: async (url: string) => {
         await persistServerUrl(url);
@@ -721,10 +741,12 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       pairWithCode,
       disconnectRelay,
       selectChat,
+      deselectChat,
       startConversation,
       listFolders,
       uploadImageForActiveChat,
       sendToActiveChat,
+      interruptActiveChat,
       cancelActiveChat,
     }),
     [
@@ -738,6 +760,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       messagesByChatId,
       eventsByChatId,
       isRespondingByChatId,
+      isStoppingByChatId,
       handleConnectLink,
       pairWithCode,
       disconnectRelay,

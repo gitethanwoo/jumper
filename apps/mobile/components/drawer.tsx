@@ -215,10 +215,13 @@ export function Drawer() {
             </View>
 
             <Pressable
-              onPress={() => setView('new')}
+              onPress={() => {
+                bridge.deselectChat();
+                drawer.close();
+              }}
               style={{
                 position: 'absolute',
-                bottom: 76,
+                bottom: 116,
                 right: 16,
                 width: 52,
                 height: 52,
@@ -381,6 +384,7 @@ export function Drawer() {
           style={{
             marginHorizontal: 12,
             marginTop: 8,
+            marginBottom: 40,
             height: 46,
             borderRadius: 12,
             borderWidth: 1,

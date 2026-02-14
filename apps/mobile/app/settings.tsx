@@ -1,4 +1,7 @@
 import React, { useMemo, useState } from 'react';
+import { Platform } from 'react-native';
+import FontAwesome from '@expo/vector-icons/FontAwesome';
+import Feather from '@expo/vector-icons/Feather';
 import { Stack, router, type Href } from 'expo-router';
 
 import Colors from '@/constants/Colors';
@@ -21,7 +24,6 @@ export default function SettingsScreen() {
     url.search = '';
     return url.toString();
   }, [bridge.serverUrl]);
-  const statusLabel = isConnected ? 'Connected' : isConnecting ? 'Connecting' : 'Not connected';
 
   const handleDisconnectRelay = () => {
     void bridge.disconnectRelay().then(() => {
@@ -31,111 +33,317 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView
-      className="flex-1 bg-sf-bg"
+      style={{ flex: 1, backgroundColor: '#FAFAF9' }}
       contentInsetAdjustmentBehavior="automatic"
-      contentContainerClassName="p-4 gap-5"
+      contentContainerStyle={{ paddingBottom: 48 }}
     >
-      <Stack.Screen options={{ title: 'Settings', headerShadowVisible: false }} />
+      <Stack.Screen
+        options={{
+          title: 'Settings',
+          headerShadowVisible: false,
+          headerStyle: { backgroundColor: '#FAFAF9' },
+        }}
+      />
 
-      <Text className="text-sf-text-2 text-[14px] leading-5">
-        Setup should be simple: run one command on your Mac, then scan a QR code.
-      </Text>
-
-      <View className="rounded-2xl bg-sf-bg-2 border border-sf-sep p-4 gap-3">
-        <Text className="text-sf-text text-[13px] font-bold uppercase tracking-[0.5px]">
-          Connect Your Mac
-        </Text>
-        <Text className="text-sf-text-2 text-[13px]">1) Run this on your Mac</Text>
-        <View className="rounded-xl bg-sf-bg border border-sf-sep p-3">
-          <Text selectable className="text-sf-text text-[12px] leading-5 font-mono">
-            npx jumper-app
-          </Text>
+      {/* ── Connection status hero ── */}
+      <View
+        style={{
+          paddingHorizontal: 24,
+          paddingTop: 20,
+          paddingBottom: 28,
+          alignItems: 'center',
+          borderBottomWidth: 1,
+          borderBottomColor: 'rgba(0,0,0,0.05)',
+        }}
+      >
+        <View
+          style={{
+            width: 64,
+            height: 64,
+            borderRadius: 18,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: isConnected ? '#D1FAE5' : isConnecting ? '#FEF3C7' : '#FEE2E2',
+            marginBottom: 14,
+          }}
+        >
+          <Feather
+            name={isConnected ? 'check-circle' : isConnecting ? 'loader' : 'wifi-off'}
+            size={28}
+            color={isConnected ? '#059669' : isConnecting ? '#D97706' : '#DC2626'}
+          />
         </View>
-        <Text className="text-sf-text-2 text-[13px] leading-5">
-          2) Scan the QR shown in your Mac terminal with iPhone Camera.
+        <Text
+          style={{
+            color: '#1C1917',
+            fontSize: 24,
+            fontWeight: '800',
+            letterSpacing: -0.5,
+            textAlign: 'center',
+            marginBottom: 6,
+          }}
+        >
+          {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Not Connected'}
         </Text>
-        <Text className="text-sf-text-3 text-[12px] leading-5">
-          Optional fallback: if terminal QR rendering is unavailable, open this URL on your Mac.
+        <Text
+          style={{
+            color: '#78716C',
+            fontSize: 14,
+            lineHeight: 20,
+            textAlign: 'center',
+            maxWidth: 260,
+          }}
+        >
+          {isConnected
+            ? 'Your Mac is linked. You can start sessions from the home screen.'
+            : isConnecting
+              ? 'Attempting to reach your Mac...'
+              : 'Run a quick command on your Mac to get started.'}
         </Text>
-        <View className="rounded-xl bg-sf-bg border border-sf-sep p-3">
-          <Text selectable className="text-sf-text-2 text-[12px] leading-5 font-mono">
-            {connectPageUrl}
-          </Text>
-        </View>
       </View>
 
-      <View className="rounded-2xl bg-sf-bg-2 border border-sf-sep p-4 gap-4">
-        <View className="flex-row items-center justify-between">
-          <Text className="text-sf-text text-[13px] font-bold uppercase tracking-[0.5px]">
-            Status
-          </Text>
-          <View className="flex-row items-center gap-1.5 px-2.5 py-1 rounded-full bg-sf-bg-3">
+      {/* ── Setup instructions (only when NOT connected) ── */}
+      {!isConnected ? (
+        <View style={{ paddingHorizontal: 16, paddingTop: 24, rowGap: 16 }}>
+          {/* Step 1 */}
+          <View
+            style={{
+              borderRadius: 16,
+              backgroundColor: '#FFFFFF',
+              borderWidth: 1,
+              borderColor: 'rgba(0,0,0,0.08)',
+              overflow: 'hidden',
+            }}
+          >
             <View
-              className={[
-                'w-[6px] h-[6px] rounded-full',
-                isConnected ? 'bg-sf-teal' : isConnecting ? 'bg-amber-500' : 'bg-sf-red',
-              ].join(' ')}
-            />
-            <Text className="text-sf-text-2 text-[11px] font-semibold">{statusLabel}</Text>
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                columnGap: 12,
+                paddingHorizontal: 16,
+                paddingTop: 16,
+                paddingBottom: 12,
+              }}
+            >
+              <View
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 14,
+                  backgroundColor: '#1C1917',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '800' }}>1</Text>
+              </View>
+              <Text style={{ color: '#1C1917', fontSize: 16, fontWeight: '700' }}>
+                Run this on your Mac
+              </Text>
+            </View>
+            <View
+              style={{
+                marginHorizontal: 16,
+                marginBottom: 16,
+                borderRadius: 12,
+                backgroundColor: '#1C1917',
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+              }}
+            >
+              <Text
+                selectable
+                style={{
+                  color: '#FBBF24',
+                  fontSize: 16,
+                  fontWeight: '600',
+                  fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+                  letterSpacing: 0.3,
+                }}
+              >
+                npx jumper-app
+              </Text>
+            </View>
+          </View>
+
+          {/* Step 2 */}
+          <View
+            style={{
+              borderRadius: 16,
+              backgroundColor: '#FFFFFF',
+              borderWidth: 1,
+              borderColor: 'rgba(0,0,0,0.08)',
+              paddingHorizontal: 16,
+              paddingVertical: 16,
+              rowGap: 8,
+            }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 12 }}>
+              <View
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 14,
+                  backgroundColor: '#1C1917',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '800' }}>2</Text>
+              </View>
+              <Text style={{ color: '#1C1917', fontSize: 16, fontWeight: '700' }}>
+                Scan the QR code
+              </Text>
+            </View>
+            <Text style={{ color: '#78716C', fontSize: 14, lineHeight: 20, paddingLeft: 40 }}>
+              Point your iPhone camera at the QR code shown in your Mac terminal.
+            </Text>
+          </View>
+
+          {/* Fallback */}
+          <View
+            style={{
+              borderRadius: 14,
+              backgroundColor: '#F5F5F4',
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              rowGap: 8,
+            }}
+          >
+            <Text style={{ color: '#A8A29E', fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Alternative
+            </Text>
+            <Text style={{ color: '#78716C', fontSize: 13, lineHeight: 19 }}>
+              If QR scanning isn't working, open this URL on your Mac:
+            </Text>
+            <View
+              style={{
+                borderRadius: 10,
+                backgroundColor: '#FFFFFF',
+                borderWidth: 1,
+                borderColor: 'rgba(0,0,0,0.06)',
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+              }}
+            >
+              <Text
+                selectable
+                style={{
+                  color: '#57534E',
+                  fontSize: 12,
+                  fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+                }}
+              >
+                {connectPageUrl}
+              </Text>
+            </View>
           </View>
         </View>
-      </View>
+      ) : null}
 
-      <View className="rounded-2xl bg-sf-bg-2 border border-sf-sep p-4 gap-3">
+      {/* ── Advanced settings ── */}
+      <View style={{ paddingHorizontal: 16, paddingTop: 24 }}>
         <Pressable
           onPress={() => setShowAdvanced((current) => !current)}
-          className="h-[42px] rounded-xl border border-sf-sep bg-sf-bg items-center justify-center"
+          style={{
+            height: 48,
+            borderRadius: 14,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            columnGap: 8,
+            backgroundColor: '#F0EDE9',
+          }}
         >
-          <Text className="text-sf-text text-[14px] font-semibold">
-            {showAdvanced ? 'Hide Advanced Settings' : 'Show Advanced Settings'}
+          <Feather name="settings" size={16} color="#78716C" />
+          <Text style={{ color: '#57534E', fontSize: 14, fontWeight: '600' }}>
+            {showAdvanced ? 'Hide Advanced' : 'Advanced Settings'}
           </Text>
+          <Feather
+            name={showAdvanced ? 'chevron-up' : 'chevron-down'}
+            size={16}
+            color="#78716C"
+          />
         </Pressable>
         {showAdvanced ? (
-          <View className="gap-3">
-            <Text className="text-sf-text-3 text-[12px]">
+          <View
+            style={{
+              marginTop: 12,
+              borderRadius: 16,
+              backgroundColor: '#FFFFFF',
+              borderWidth: 1,
+              borderColor: 'rgba(0,0,0,0.08)',
+              paddingHorizontal: 16,
+              paddingVertical: 16,
+              rowGap: 12,
+            }}
+          >
+            <Text style={{ color: '#A8A29E', fontSize: 12 }}>
               Only use these if automatic setup is unavailable.
             </Text>
             <Pressable
-              onPress={() => {
-                router.push('/pair' as Href);
+              onPress={() => router.push('/pair' as Href)}
+              style={{
+                height: 44,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: 'rgba(0,0,0,0.08)',
+                backgroundColor: '#FAFAF9',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
-              className="h-[42px] rounded-xl border border-sf-sep bg-sf-bg items-center justify-center"
             >
-              <Text className="text-sf-text text-[14px] font-semibold">Enter Pairing Code Manually</Text>
+              <Text style={{ color: '#1C1917', fontSize: 14, fontWeight: '600' }}>
+                Enter Pairing Code Manually
+              </Text>
             </Pressable>
             <Pressable
               onPress={handleDisconnectRelay}
               disabled={bridge.connectionMode !== 'relay'}
-              className={[
-                'h-[42px] rounded-xl items-center justify-center',
-                bridge.connectionMode === 'relay' ? 'bg-sf-red' : 'bg-sf-bg-3',
-              ].join(' ')}
+              style={{
+                height: 44,
+                borderRadius: 12,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: bridge.connectionMode === 'relay' ? '#DC2626' : '#E7E5E4',
+              }}
             >
               <Text
-                className={[
-                  'text-[14px] font-semibold',
-                  bridge.connectionMode === 'relay' ? 'text-white' : 'text-sf-text-3',
-                ].join(' ')}
+                style={{
+                  color: bridge.connectionMode === 'relay' ? '#FFFFFF' : '#A8A29E',
+                  fontSize: 14,
+                  fontWeight: '600',
+                }}
               >
                 Disconnect Pairing
               </Text>
             </Pressable>
-            <View className="gap-2">
-              <Text className="text-sf-text text-[13px] font-bold uppercase tracking-[0.5px]">
-                Server URL (Manual)
+            <View style={{ rowGap: 8, paddingTop: 4 }}>
+              <Text style={{ color: '#1C1917', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                Server URL
               </Text>
               <TextInput
                 value={bridge.serverUrl}
                 onChangeText={(value) => void bridge.setServerUrl(value)}
                 placeholder="ws://hostname:8787/ws"
-                placeholderTextColor={colors.tabIconDefault}
+                placeholderTextColor="#A8A29E"
                 selectionColor={colors.tint}
                 keyboardAppearance={colorScheme}
                 autoCapitalize="none"
                 autoCorrect={false}
-                className="h-[44px] rounded-xl px-4 bg-sf-bg text-sf-text text-[15px] border border-sf-sep"
+                style={{
+                  height: 44,
+                  borderRadius: 12,
+                  paddingHorizontal: 14,
+                  backgroundColor: '#F5F5F4',
+                  color: '#1C1917',
+                  fontSize: 14,
+                  fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+                }}
               />
-              <Text className="text-sf-text-3 text-[12px]">WebSocket endpoint, e.g. ws://hostname:8787/ws</Text>
+              <Text style={{ color: '#A8A29E', fontSize: 12 }}>
+                WebSocket endpoint, e.g. ws://hostname:8787/ws
+              </Text>
             </View>
           </View>
         ) : null}
