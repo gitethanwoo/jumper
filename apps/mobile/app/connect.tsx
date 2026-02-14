@@ -1,5 +1,5 @@
-import { Stack, router } from 'expo-router';
-import { useEffect } from 'react';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
+import { useEffect, useRef } from 'react';
 import * as Linking from 'expo-linking';
 
 import { useBridge } from '@/lib/bridge/bridge-provider';
@@ -8,13 +8,25 @@ import { Text, View } from '@/tw';
 export default function ConnectScreen() {
   const bridge = useBridge();
   const url = Linking.useURL();
+  const handledRef = useRef(false);
+  const params = useLocalSearchParams<{ server?: string | string[] }>();
 
   useEffect(() => {
-    if (!url) return;
-    void bridge.handleConnectLink(url).then(() => {
+    if (handledRef.current) return;
+
+    const serverParam = Array.isArray(params.server) ? params.server[0] : params.server;
+    const fallbackFromParams =
+      typeof serverParam === 'string' && serverParam.length > 0
+        ? `jumper://connect?server=${encodeURIComponent(serverParam)}`
+        : null;
+    const connectUrl = url ?? fallbackFromParams;
+    if (!connectUrl) return;
+
+    handledRef.current = true;
+    void bridge.handleConnectLink(connectUrl).then(() => {
       router.replace('/');
     });
-  }, [bridge, url]);
+  }, [bridge, params.server, url]);
 
   return (
     <View
@@ -31,7 +43,7 @@ export default function ConnectScreen() {
         Connecting…
       </Text>
       <Text style={{ color: '#78716C', fontSize: 15, textAlign: 'center', lineHeight: 22 }}>
-        Applying bridge URL from your QR link.
+        Applying your Jumper link. This should take a second.
       </Text>
     </View>
   );

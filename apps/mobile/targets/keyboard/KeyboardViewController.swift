@@ -1271,7 +1271,7 @@ final class KeyboardViewController: UIInputViewController {
 
         if !hasFullAccess {
             latestReply = ""
-            latestResultText = "Full Access is required. Enable it in Settings > Keyboards > cc-bridge Keyboard."
+            latestResultText = "Full Access is required. Enable it in Settings > Keyboards > Jumper Keyboard."
             outputView.text = latestResultText
             currentMode = .result
             return
@@ -1282,7 +1282,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         guard let endpoint = makeKeyboardEndpoint(from: sharedConfig.serverURL) else {
             latestReply = ""
-            latestResultText = "Invalid bridge server URL. Open cc-bridge app and reconnect."
+            latestResultText = "Invalid bridge server URL. Open Jumper and reconnect."
             outputView.text = latestResultText
             currentMode = .result
             return
@@ -1386,7 +1386,7 @@ final class KeyboardViewController: UIInputViewController {
 
         guard let serverURL = defaults.string(forKey: bridgeServerURLKey), !serverURL.isEmpty else {
             latestReply = ""
-            latestResultText = "Bridge server URL is missing. Open cc-bridge app and connect first."
+            latestResultText = "Bridge server URL is missing. Open Jumper and connect first."
             outputView.text = latestResultText
             currentMode = .result
             return nil

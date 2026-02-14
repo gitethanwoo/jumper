@@ -19,12 +19,12 @@ export default function PairScreen() {
 
   return (
     <View className="flex-1 bg-sf-bg px-5 pt-6 gap-5">
-      <Stack.Screen options={{ title: 'Pair Relay', headerShadowVisible: false }} />
+      <Stack.Screen options={{ title: 'Connection Code', headerShadowVisible: false }} />
 
       <View className="gap-2">
-        <Text className="text-sf-text text-[22px] font-bold">Connect with pairing code</Text>
+        <Text className="text-sf-text text-[22px] font-bold">Connect with code</Text>
         <Text className="text-sf-text-2 text-[14px] leading-5">
-          Enter the code shown by your bridge server to connect through relay mode.
+          Enter the code shown by npx jumper-app on your Mac.
         </Text>
       </View>
 
@@ -55,7 +55,7 @@ export default function PairScreen() {
 
       <View className="rounded-xl bg-sf-bg-2 border border-sf-sep p-3">
         <Text className="text-sf-text-2 text-[12px] leading-5">
-          Mode: {bridge.connectionMode} | Status: {bridge.status}
+          Status: {bridge.status}
         </Text>
       </View>
     </View>
