@@ -4,6 +4,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import type {
   Chat,
   ChatAttachment,
+  FolderListResult,
   ChatMessage,
   ClientToServer,
   Project,
@@ -39,6 +40,7 @@ type BridgeState = {
 
   selectChat: (chatId: string) => void;
   startConversation: (folderPath: string) => void;
+  listFolders: (path?: string) => Promise<FolderListResult>;
 
   uploadImageForActiveChat: (input: {
     uri: string;
@@ -62,6 +64,11 @@ type PendingPair = {
 
 type PendingUpload = {
   resolve: (attachment: ChatAttachment) => void;
+  reject: (error: Error) => void;
+};
+
+type PendingFolderList = {
+  resolve: (result: FolderListResult) => void;
   reject: (error: Error) => void;
 };
 
@@ -188,6 +195,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const pendingReconnectRef = useRef<ReconnectTarget | null>(null);
   const pendingPairRef = useRef<PendingPair | null>(null);
   const pendingUploadsRef = useRef<PendingUpload[]>([]);
+  const pendingFolderListsRef = useRef<Map<string, PendingFolderList>>(new Map());
   const relaySessionRef = useRef<RelayStore.RelaySession | null>(null);
   const statusRef = useRef<Status>('disconnected');
   const serverUrlRef = useRef('ws://localhost:8787/ws');
@@ -250,6 +258,14 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     pendingUploadsRef.current = [];
     for (const upload of pending) {
       upload.reject(new Error(message));
+    }
+  };
+
+  const rejectPendingFolderLists = (message: string) => {
+    const pending = Array.from(pendingFolderListsRef.current.values());
+    pendingFolderListsRef.current.clear();
+    for (const request of pending) {
+      request.reject(new Error(message));
     }
   };
 
@@ -331,6 +347,21 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       if (!pending) return;
       pendingUploadsRef.current = pendingUploadsRef.current.slice(1);
       pending.resolve(msg.attachment);
+      return;
+    }
+
+    if (msg.type === 'folders.list.result') {
+      const pending = pendingFolderListsRef.current.get(msg.requestId);
+      if (!pending) return;
+      pendingFolderListsRef.current.delete(msg.requestId);
+      pending.resolve({
+        requestId: msg.requestId,
+        path: msg.path,
+        parentPath: msg.parentPath,
+        directories: msg.directories,
+        suggestedRoots: msg.suggestedRoots,
+        resumeFolders: msg.resumeFolders,
+      });
       return;
     }
 
@@ -427,6 +458,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       statusRef.current = 'disconnected';
       setPeerConnected(false);
       rejectPendingUploads('Connection closed');
+      rejectPendingFolderLists('Connection closed');
 
       const reconnectTarget = pendingReconnectRef.current;
       if (reconnectTarget) {
@@ -491,6 +523,18 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     }
 
     sendOrQueue({ type: 'projects.create', name: projectName, path });
+  };
+
+  const listFolders = async (path?: string): Promise<FolderListResult> => {
+    const requestId = nextId('folders');
+    return await new Promise<FolderListResult>((resolve, reject) => {
+      pendingFolderListsRef.current.set(requestId, { resolve, reject });
+      if (path && path.trim().length > 0) {
+        sendOrQueue({ type: 'folders.list', requestId, path });
+        return;
+      }
+      sendOrQueue({ type: 'folders.list', requestId });
+    });
   };
 
   const pairWithCode = async (code: string) => {
@@ -678,6 +722,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       disconnectRelay,
       selectChat,
       startConversation,
+      listFolders,
       uploadImageForActiveChat,
       sendToActiveChat,
       cancelActiveChat,
@@ -696,6 +741,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       handleConnectLink,
       pairWithCode,
       disconnectRelay,
+      listFolders,
     ]
   );
 

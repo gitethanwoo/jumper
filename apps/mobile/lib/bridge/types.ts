@@ -21,6 +21,25 @@ export type ChatAttachment = {
   sizeBytes: number;
 };
 
+export type FolderEntry = {
+  name: string;
+  path: string;
+};
+
+export type ResumeFolder = {
+  path: string;
+  conversationCount: number;
+};
+
+export type FolderListResult = {
+  requestId: string;
+  path: string;
+  parentPath: string | null;
+  directories: FolderEntry[];
+  suggestedRoots: string[];
+  resumeFolders: ResumeFolder[];
+};
+
 export type RelayRole = 'bridge' | 'mobile';
 
 export type RelayRegisteredMessage = {
@@ -72,7 +91,8 @@ export type ClientToServer =
   | { type: 'chats.history'; chatId: string }
   | { type: 'chats.send'; chatId: string; text: string; attachments?: ChatAttachment[] }
   | { type: 'chats.cancel'; chatId: string }
-  | { type: 'upload-image'; chatId: string; fileName: string; mimeType: string; base64: string };
+  | { type: 'upload-image'; chatId: string; fileName: string; mimeType: string; base64: string }
+  | { type: 'folders.list'; requestId: string; path?: string };
 
 export type ServerToClient =
   | { type: 'projects.list.result'; projects: Project[] }
@@ -83,6 +103,15 @@ export type ServerToClient =
   | { type: 'claude.event'; chatId: string; event: unknown }
   | { type: 'claude.done'; chatId: string; exitCode: number | null; signal: string | null }
   | { type: 'upload-image.result'; attachment: ChatAttachment }
+  | {
+      type: 'folders.list.result';
+      requestId: string;
+      path: string;
+      parentPath: string | null;
+      directories: FolderEntry[];
+      suggestedRoots: string[];
+      resumeFolders: ResumeFolder[];
+    }
   | { type: 'error'; message: string };
 
 export type ChatMessage = {

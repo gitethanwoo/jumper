@@ -112,6 +112,26 @@ export type UploadImageResult = {
   attachment: ChatAttachment;
 };
 
+export type FolderEntry = {
+  name: string;
+  path: string;
+};
+
+export type ResumeFolder = {
+  path: string;
+  conversationCount: number;
+};
+
+export type FoldersListResult = {
+  type: "folders.list.result";
+  requestId: string;
+  path: string;
+  parentPath: string | null;
+  directories: FolderEntry[];
+  suggestedRoots: string[];
+  resumeFolders: ResumeFolder[];
+};
+
 export type ServerToClient =
   | ProjectsListResult
   | ProjectsCreateResult
@@ -121,6 +141,7 @@ export type ServerToClient =
   | ClaudeEvent
   | ClaudeDone
   | UploadImageResult
+  | FoldersListResult
   | ErrorMessage;
 
 export type ProjectsListMessage = { type: "projects.list" };
@@ -146,6 +167,11 @@ export type UploadImageMessage = {
   mimeType: string;
   base64: string;
 };
+export type FoldersListMessage = {
+  type: "folders.list";
+  requestId: string;
+  path?: string;
+};
 
 export type ClientToServer =
   | ProjectsListMessage
@@ -155,4 +181,5 @@ export type ClientToServer =
   | ChatsHistoryMessage
   | ChatsSendMessage
   | ChatsCancelMessage
-  | UploadImageMessage;
+  | UploadImageMessage
+  | FoldersListMessage;

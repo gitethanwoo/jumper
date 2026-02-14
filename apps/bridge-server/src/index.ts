@@ -28,7 +28,9 @@ const PORT = Number(process.env.PORT ?? "8787");
 const HOST = process.env.HOST ?? "0.0.0.0";
 const RELAY_URL = process.env.RELAY_URL;
 const PROJECTS_ROOT =
-  process.env.PROJECTS_ROOT ?? path.join(os.homedir(), "dev", "cc-bridge-projects");
+  process.env.PROJECTS_ROOT ?? path.join(os.homedir(), "dev", "jumper-projects");
+const CLAUDE_HISTORY_PATH = path.join(os.homedir(), ".claude", "history.jsonl");
+const CLAUDE_PROJECTS_PATH = path.join(os.homedir(), ".claude", "projects");
 
 type ChatHistoryMessage = {
   id: string;
@@ -111,6 +113,210 @@ async function normalizeStateProjectPaths(state: State): Promise<State> {
   const next = { ...state, projects: normalizedProjects };
   await saveState(next);
   return next;
+}
+
+function extractJsonStringField(line: string, field: string): string | null {
+  const match = line.match(new RegExp(`"${field}"\\s*:\\s*"([^"]+)"`));
+  const value = match?.[1];
+  if (!value) return null;
+  return value;
+}
+
+function extractJsonNumberField(line: string, field: string): number | null {
+  const match = line.match(new RegExp(`"${field}"\\s*:\\s*(\\d+)`));
+  const raw = match?.[1];
+  if (!raw) return null;
+  return Number(raw);
+}
+
+function parentDirectory(input: string): string | null {
+  const parent = path.dirname(input);
+  if (parent === input) return null;
+  return parent;
+}
+
+async function recentProjectsFromClaudeHistory(limit = 300): Promise<string[]> {
+  if (!existsSync(CLAUDE_HISTORY_PATH)) return [];
+
+  const raw = await fs.readFile(CLAUDE_HISTORY_PATH, "utf8");
+  const lines = raw.split("\n");
+  const projects: string[] = [];
+  const seen = new Set<string>();
+
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (projects.length >= limit) break;
+    const line = lines[i]?.trim();
+    if (!line) continue;
+    const project = extractJsonStringField(line, "project");
+    if (!project) continue;
+    const normalized = normalizeProjectPath(project);
+    if (!existsSync(normalized)) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    projects.push(normalized);
+  }
+  return projects;
+}
+
+function rankWorkspaceRoots(
+  projectPaths: string[]
+): Array<{ path: string; count: number; firstSeenRank: number }> {
+  const counts = new Map<string, { count: number; firstSeenRank: number }>();
+
+  projectPaths.forEach((projectPath, rank) => {
+    const parent = parentDirectory(projectPath);
+    if (!parent) return;
+    const existing = counts.get(parent);
+    if (!existing) {
+      counts.set(parent, { count: 1, firstSeenRank: rank });
+      return;
+    }
+    counts.set(parent, { count: existing.count + 1, firstSeenRank: existing.firstSeenRank });
+  });
+
+  return Array.from(counts.entries())
+    .map(([candidatePath, candidate]) => ({ path: candidatePath, ...candidate }))
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.firstSeenRank - b.firstSeenRank;
+    });
+}
+
+async function mostRecentProjectFromClaudeSessions(): Promise<string | null> {
+  if (!existsSync(CLAUDE_PROJECTS_PATH)) return null;
+
+  const projectDirs = await fs.readdir(CLAUDE_PROJECTS_PATH, { withFileTypes: true });
+  let latestSessionFile: string | null = null;
+  let latestMtimeMs = -1;
+
+  for (const projectDir of projectDirs) {
+    if (!projectDir.isDirectory()) continue;
+    const projectDirPath = path.join(CLAUDE_PROJECTS_PATH, projectDir.name);
+    const entries = await fs.readdir(projectDirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.endsWith(".jsonl")) continue;
+      const filePath = path.join(projectDirPath, entry.name);
+      const stats = await fs.stat(filePath);
+      if (stats.mtimeMs <= latestMtimeMs) continue;
+      latestMtimeMs = stats.mtimeMs;
+      latestSessionFile = filePath;
+    }
+  }
+
+  if (!latestSessionFile) return null;
+  const raw = await fs.readFile(latestSessionFile, "utf8");
+  const lines = raw.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const cwd = extractJsonStringField(trimmed, "cwd");
+    if (!cwd) continue;
+    const normalized = normalizeProjectPath(cwd);
+    if (!existsSync(normalized)) continue;
+    return normalized;
+  }
+  return null;
+}
+
+async function inferDefaultFolderBrowsePath(): Promise<string> {
+  const recentHistoryProjects = await recentProjectsFromClaudeHistory();
+  const rankedRoots = rankWorkspaceRoots(recentHistoryProjects);
+  const likelyHistoryRoot = rankedRoots[0]?.path ?? null;
+  if (likelyHistoryRoot && existsSync(likelyHistoryRoot)) return likelyHistoryRoot;
+
+  const fromHistory = recentHistoryProjects[0];
+  if (fromHistory) {
+    const parent = parentDirectory(fromHistory);
+    if (parent && existsSync(parent)) return parent;
+    return fromHistory;
+  }
+
+  const fromSessions = await mostRecentProjectFromClaudeSessions();
+  if (fromSessions) {
+    const parent = parentDirectory(fromSessions);
+    if (parent && existsSync(parent)) return parent;
+    return fromSessions;
+  }
+
+  return os.homedir();
+}
+
+async function inferSuggestedFolderRoots(max = 3): Promise<string[]> {
+  const recentHistoryProjects = await recentProjectsFromClaudeHistory();
+  const rankedRoots = rankWorkspaceRoots(recentHistoryProjects).map((entry) => entry.path);
+  const suggestions: string[] = [...rankedRoots];
+
+  const mostRecentProject = recentHistoryProjects[0];
+  if (mostRecentProject) {
+    suggestions.push(mostRecentProject);
+  }
+
+  const fromSessions = await mostRecentProjectFromClaudeSessions();
+  if (fromSessions) {
+    const parent = parentDirectory(fromSessions);
+    if (parent) suggestions.push(parent);
+    suggestions.push(fromSessions);
+  }
+
+  suggestions.push(os.homedir());
+
+  const unique: string[] = [];
+  for (const candidate of suggestions) {
+    if (!existsSync(candidate)) continue;
+    if (unique.includes(candidate)) continue;
+    unique.push(candidate);
+    if (unique.length >= max) break;
+  }
+  return unique;
+}
+
+async function inferResumeFolders(max = 5): Promise<Array<{ path: string; conversationCount: number }>> {
+  if (!existsSync(CLAUDE_HISTORY_PATH)) return [];
+
+  const raw = await fs.readFile(CLAUDE_HISTORY_PATH, "utf8");
+  const lines = raw.split("\n");
+  const statsByPath = new Map<string, { sessions: Set<string>; lastActive: number }>();
+  let scanned = 0;
+
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (scanned >= 4_000) break;
+    const line = lines[i]?.trim();
+    if (!line) continue;
+    scanned += 1;
+
+    const project = extractJsonStringField(line, "project");
+    const sessionId = extractJsonStringField(line, "sessionId");
+    if (!project || !sessionId) continue;
+
+    const normalizedPath = normalizeProjectPath(project);
+    if (!existsSync(normalizedPath)) continue;
+
+    const timestamp = extractJsonNumberField(line, "timestamp") ?? 0;
+    const existing = statsByPath.get(normalizedPath);
+    if (!existing) {
+      statsByPath.set(normalizedPath, {
+        sessions: new Set([sessionId]),
+        lastActive: timestamp,
+      });
+      continue;
+    }
+    existing.sessions.add(sessionId);
+    if (timestamp > existing.lastActive) existing.lastActive = timestamp;
+  }
+
+  return Array.from(statsByPath.entries())
+    .map(([path, value]) => ({
+      path,
+      conversationCount: value.sessions.size,
+      lastActive: value.lastActive,
+    }))
+    .sort((a, b) => {
+      if (b.lastActive !== a.lastActive) return b.lastActive - a.lastActive;
+      return b.conversationCount - a.conversationCount;
+    })
+    .slice(0, max)
+    .map(({ path, conversationCount }) => ({ path, conversationCount }));
 }
 
 function claudeProjectDir(cwd: string): string {
@@ -578,7 +784,7 @@ function wsUrlForHost(hostWithPort: string, secure: boolean): string {
 }
 
 function connectLinkForServer(serverUrl: string): string {
-  return `mobile://connect?server=${encodeURIComponent(serverUrl)}`;
+  return `jumper://connect?server=${encodeURIComponent(serverUrl)}`;
 }
 
 function connectPageUrlForServer(hostWithPort: string, secure: boolean): string {
@@ -601,17 +807,18 @@ async function main() {
   const suggestedWs = wsUrlForHost(suggestedHost, false);
   const suggestedConnectPage = connectPageUrlForServer(suggestedHost, false);
   const suggestedDeepLink = connectLinkForServer(suggestedWs);
-
-  console.log(`[cc-bridge] projects root: ${PROJECTS_ROOT}`);
-  console.log(`[cc-bridge] host: ${HOST}`);
-  console.log(`[cc-bridge] ws: ws://${HOST}:${PORT}/ws`);
-  console.log(`[cc-bridge] connect page: ${suggestedConnectPage}`);
-  console.log(`[cc-bridge] connect link: ${suggestedDeepLink}`);
+  const startupQr = await QRCode.toString(suggestedDeepLink, {
+    type: "terminal",
+    small: true,
+  });
 
   const active = new Map<string, ReturnType<typeof spawn>>();
 
   let state: State = await loadState();
   state = await normalizeStateProjectPaths(state);
+  let defaultFolderBrowsePath: string | null = null;
+  let suggestedFolderRoots: string[] | null = null;
+  let resumeFolders: Array<{ path: string; conversationCount: number }> | null = null;
 
   const handleClientMessage = async (
     msg: ClientToServer,
@@ -692,6 +899,46 @@ async function main() {
     if (msg.type === "upload-image") {
       const attachment = await uploadImage(state, msg);
       reply({ type: "upload-image.result", attachment });
+      return;
+    }
+
+    if (msg.type === "folders.list") {
+      if (!suggestedFolderRoots) {
+        suggestedFolderRoots = await inferSuggestedFolderRoots(3);
+      }
+      if (!resumeFolders) {
+        resumeFolders = await inferResumeFolders(5);
+      }
+      if (!defaultFolderBrowsePath) {
+        defaultFolderBrowsePath = suggestedFolderRoots[0] ?? (await inferDefaultFolderBrowsePath());
+      }
+
+      let requestedPath: string;
+      if (typeof msg.path === "string" && msg.path.trim().length > 0) {
+        requestedPath = msg.path;
+      } else {
+        requestedPath = defaultFolderBrowsePath;
+      }
+      const folderPath = normalizeProjectPath(requestedPath);
+      const entries = await fs.readdir(folderPath, { withFileTypes: true });
+      const directories = entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({
+          name: entry.name,
+          path: path.join(folderPath, entry.name),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const parentPath = path.dirname(folderPath);
+
+      reply({
+        type: "folders.list.result",
+        requestId: msg.requestId,
+        path: folderPath,
+        parentPath: parentPath === folderPath ? null : parentPath,
+        directories,
+        suggestedRoots: suggestedFolderRoots,
+        resumeFolders,
+      });
       return;
     }
 
@@ -798,7 +1045,7 @@ async function main() {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>cc-bridge Connect</title>
+    <title>Connect to Jumper</title>
     <style>
       :root {
         color-scheme: light;
@@ -907,8 +1154,8 @@ async function main() {
   </head>
   <body>
     <div class="card">
-      <h1>Connect iPhone to cc-bridge</h1>
-      <p>Scan once. The app saves your server URL and connects automatically.</p>
+      <h1>Connect to Jumper</h1>
+      <p>Start jumping with one scan. The app saves your server URL and reconnects automatically.</p>
 
       <div class="layout">
         <img class="qr" src="${qrCodeImage}" alt="QR code to connect mobile app" />
@@ -919,7 +1166,7 @@ async function main() {
           </div>
           <div class="step">
             <div class="num">2</div>
-            <p>Tap the banner to open the cc-bridge app.</p>
+            <p>Tap the banner to open the Jumper app.</p>
           </div>
           <div class="step">
             <div class="num">3</div>
@@ -1002,7 +1249,7 @@ async function main() {
     }
 
     res.writeHead(200, { "content-type": "text/plain" });
-    res.end("cc-bridge\n");
+    res.end("jumper\n");
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -1028,40 +1275,29 @@ async function main() {
       relayUrl: RELAY_URL,
       session: relaySession,
       onPairingCode: (message) => {
-        console.log(`[cc-bridge] relay code: ${message.code}`);
-        console.log("[cc-bridge] Enter this code in the mobile app to connect.");
+        console.log(`Pairing code: ${message.code}`);
       },
       onPaired: async (session) => {
         await saveRelaySession(session);
-        console.log(`[cc-bridge] relay paired: session ${session.sessionId}`);
       },
       onPayload: async (payload) => {
         const msg = parseMessagePayload(payload);
         await handleClientMessage(msg, (message) => relayClient.send(JSON.stringify(message)));
       },
       onControlMessage: (message) => {
-        if (message.type === "relay.peer_connected") {
-          console.log(`[cc-bridge] relay peer connected: ${message.peer}`);
-          return;
-        }
-        if (message.type === "relay.peer_disconnected") {
-          console.log(`[cc-bridge] relay peer disconnected: ${message.peer}`);
-          return;
-        }
-        if (message.type === "relay.reconnected") {
-          console.log(`[cc-bridge] relay reconnected: ${message.role}`);
-          return;
-        }
         if (message.type === "relay.error") {
-          console.log(`[cc-bridge] relay error: ${message.message}`);
+          console.error(`Relay error: ${message.message}`);
         }
       },
     });
     relayClient.connect();
-    console.log(`[cc-bridge] relay: ${RELAY_URL}`);
   }
 
-  httpServer.listen(PORT, HOST);
+  await new Promise<void>((resolve) => {
+    httpServer.listen(PORT, HOST, () => resolve());
+  });
+  console.log("Bridge started.\n");
+  console.log(startupQr);
 }
 
 void main();
