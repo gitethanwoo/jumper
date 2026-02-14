@@ -38,12 +38,6 @@ type ResumeFolder = {
   conversationCount: number;
 };
 
-function projectPathKey(projectPath: string): string {
-  const trimmed = projectPath.trim();
-  if (trimmed === '/' || trimmed === '\\') return '/';
-  return trimmed.replace(/[\\/]+$/, '').replace(/\\/g, '/');
-}
-
 export default function ChatScreen() {
   const bridge = useBridge();
   const drawer = useDrawer();
@@ -94,21 +88,6 @@ export default function ChatScreen() {
     if (!activeChat) return null;
     return projectById[activeChat.projectId]?.path ?? null;
   }, [activeChat, projectById]);
-  const recentProjects = useMemo(
-    () => {
-      const sorted = [...bridge.projects].sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      );
-      const uniqueByPath = new Map<string, (typeof sorted)[number]>();
-      for (const project of sorted) {
-        const key = projectPathKey(project.path);
-        if (uniqueByPath.has(key)) continue;
-        uniqueByPath.set(key, project);
-      }
-      return Array.from(uniqueByPath.values()).slice(0, 4);
-    },
-    [bridge.projects]
-  );
   const recentChats = useMemo(
     () =>
       [...bridge.allChats]
@@ -679,54 +658,6 @@ export default function ChatScreen() {
               </Text>
             </Pressable>
           </View>
-
-          {recentProjects.length > 0 ? (
-            <View
-              style={{
-                borderRadius: 18,
-                borderWidth: 1,
-                borderColor: palette.border,
-                backgroundColor: '#FFFFFF',
-                paddingHorizontal: 16,
-                paddingVertical: 14,
-                rowGap: 8,
-              }}
-            >
-              <Text
-                style={{
-                  color: palette.text,
-                  fontSize: 12,
-                  fontWeight: '700',
-                  letterSpacing: 0.6,
-                  textTransform: 'uppercase',
-                }}
-              >
-                Existing Folders
-              </Text>
-              {recentProjects.map((project) => (
-                <Pressable
-                  key={project.id}
-                  onPress={() => bridge.startConversation(project.path)}
-                  style={{
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: 'rgba(0,0,0,0.06)',
-                    backgroundColor: '#FAFAF9',
-                    paddingHorizontal: 12,
-                    paddingVertical: 10,
-                    rowGap: 3,
-                  }}
-                >
-                  <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
-                    {project.name}
-                  </Text>
-                  <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
-                    {project.path}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
 
           {resumeFolders.length > 0 ? (
             <View
