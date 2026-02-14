@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Platform } from 'react-native';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import Feather from '@expo/vector-icons/Feather';
-import { Stack, router, type Href } from 'expo-router';
+import { Stack } from 'expo-router';
 
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
@@ -16,6 +16,8 @@ export default function SettingsScreen() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const isConnected = bridge.status === 'connected';
   const isConnecting = bridge.status === 'connecting';
+  const isRelayMode = bridge.connectionMode === 'relay';
+  const shouldCenterOnboarding = !isConnected;
   const connectPageUrl = useMemo(() => {
     const url = new URL(bridge.serverUrl);
     if (url.protocol === 'ws:') url.protocol = 'http:';
@@ -26,16 +28,14 @@ export default function SettingsScreen() {
   }, [bridge.serverUrl]);
 
   const handleDisconnectRelay = () => {
-    void bridge.disconnectRelay().then(() => {
-      router.replace('/pair' as Href);
-    });
+    void bridge.disconnectRelay();
   };
 
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: '#FAFAF9' }}
       contentInsetAdjustmentBehavior="automatic"
-      contentContainerStyle={{ paddingBottom: 48 }}
+      contentContainerStyle={{ paddingBottom: 48, flexGrow: 1 }}
     >
       <Stack.Screen
         options={{
@@ -45,66 +45,72 @@ export default function SettingsScreen() {
         }}
       />
 
-      {/* ── Connection status hero ── */}
       <View
         style={{
-          paddingHorizontal: 24,
-          paddingTop: 20,
-          paddingBottom: 28,
-          alignItems: 'center',
-          borderBottomWidth: 1,
-          borderBottomColor: 'rgba(0,0,0,0.05)',
+          flexGrow: shouldCenterOnboarding ? 1 : 0,
+          justifyContent: shouldCenterOnboarding ? 'center' : 'flex-start',
         }}
       >
+        {/* ── Connection status hero ── */}
         <View
           style={{
-            width: 64,
-            height: 64,
-            borderRadius: 18,
+            paddingHorizontal: 24,
+            paddingTop: shouldCenterOnboarding ? 8 : 20,
+            paddingBottom: 28,
             alignItems: 'center',
-            justifyContent: 'center',
-            backgroundColor: isConnected ? '#D1FAE5' : isConnecting ? '#FEF3C7' : '#FEE2E2',
-            marginBottom: 14,
+            borderBottomWidth: isConnected ? 1 : 0,
+            borderBottomColor: 'rgba(0,0,0,0.05)',
           }}
         >
-          <Feather
-            name={isConnected ? 'check-circle' : isConnecting ? 'loader' : 'wifi-off'}
-            size={28}
-            color={isConnected ? '#059669' : isConnecting ? '#D97706' : '#DC2626'}
-          />
+          <View
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 18,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: isConnected ? '#D1FAE5' : isConnecting ? '#FEF3C7' : '#FEE2E2',
+              marginBottom: 14,
+            }}
+          >
+            <Feather
+              name={isConnected ? 'check-circle' : isConnecting ? 'loader' : 'wifi-off'}
+              size={28}
+              color={isConnected ? '#059669' : isConnecting ? '#D97706' : '#DC2626'}
+            />
+          </View>
+          <Text
+            style={{
+              color: '#1C1917',
+              fontSize: 24,
+              fontWeight: '800',
+              letterSpacing: -0.5,
+              textAlign: 'center',
+              marginBottom: 6,
+            }}
+          >
+            {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Not Connected'}
+          </Text>
+          <Text
+            style={{
+              color: '#78716C',
+              fontSize: 14,
+              lineHeight: 20,
+              textAlign: 'center',
+              maxWidth: 260,
+            }}
+          >
+            {isConnected
+              ? 'Your Mac is linked. You can start sessions from the home screen.'
+              : isConnecting
+                ? 'Attempting to reach your Mac...'
+                : 'Run a quick command on your Mac to get started.'}
+          </Text>
         </View>
-        <Text
-          style={{
-            color: '#1C1917',
-            fontSize: 24,
-            fontWeight: '800',
-            letterSpacing: -0.5,
-            textAlign: 'center',
-            marginBottom: 6,
-          }}
-        >
-          {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Not Connected'}
-        </Text>
-        <Text
-          style={{
-            color: '#78716C',
-            fontSize: 14,
-            lineHeight: 20,
-            textAlign: 'center',
-            maxWidth: 260,
-          }}
-        >
-          {isConnected
-            ? 'Your Mac is linked. You can start sessions from the home screen.'
-            : isConnecting
-              ? 'Attempting to reach your Mac...'
-              : 'Run a quick command on your Mac to get started.'}
-        </Text>
-      </View>
 
-      {/* ── Setup instructions (only when NOT connected) ── */}
-      {!isConnected ? (
-        <View style={{ paddingHorizontal: 16, paddingTop: 24, rowGap: 16 }}>
+        {/* ── Setup instructions (only when NOT connected) ── */}
+        {!isConnected ? (
+          <View style={{ paddingHorizontal: 16, paddingTop: 8, rowGap: 16 }}>
           {/* Step 1 */}
           <View
             style={{
@@ -238,8 +244,71 @@ export default function SettingsScreen() {
               </Text>
             </View>
           </View>
-        </View>
-      ) : null}
+
+          <View
+            style={{
+              borderRadius: 14,
+              backgroundColor: '#EFF6FF',
+              borderWidth: 1,
+              borderColor: '#BFDBFE',
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              rowGap: 8,
+            }}
+          >
+            <Text
+              style={{
+                color: '#1E3A8A',
+                fontSize: 12,
+                fontWeight: '700',
+                textTransform: 'uppercase',
+                letterSpacing: 0.5,
+              }}
+            >
+              Away from Your Mac? (Tailscale/VPN)
+            </Text>
+            <Text style={{ color: '#1E40AF', fontSize: 13, lineHeight: 19 }}>
+              If you started Jumper over SSH, use a reachable host and connect directly.
+            </Text>
+            <View
+              style={{
+                borderRadius: 10,
+                backgroundColor: '#DBEAFE',
+                borderWidth: 1,
+                borderColor: '#93C5FD',
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                rowGap: 6,
+              }}
+            >
+              <Text
+                selectable
+                style={{
+                  color: '#1E3A8A',
+                  fontSize: 12,
+                  fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+                }}
+              >
+                PUBLIC_HOST=mac-studio npx jumper-app
+              </Text>
+              <Text
+                selectable
+                style={{
+                  color: '#1E3A8A',
+                  fontSize: 12,
+                  fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+                }}
+              >
+                ws://mac-studio:8787/ws
+              </Text>
+            </View>
+            <Text style={{ color: '#1E40AF', fontSize: 12, lineHeight: 18 }}>
+              In Jumper, open Advanced Settings and paste that ws URL into Server URL.
+            </Text>
+          </View>
+          </View>
+        ) : null}
+      </View>
 
       {/* ── Advanced settings ── */}
       <View style={{ paddingHorizontal: 16, paddingTop: 24 }}>
@@ -281,43 +350,28 @@ export default function SettingsScreen() {
             <Text style={{ color: '#A8A29E', fontSize: 12 }}>
               Only use these if automatic setup is unavailable.
             </Text>
-            <Pressable
-              onPress={() => router.push('/pair' as Href)}
-              style={{
-                height: 44,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: 'rgba(0,0,0,0.08)',
-                backgroundColor: '#FAFAF9',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Text style={{ color: '#1C1917', fontSize: 14, fontWeight: '600' }}>
-                Enter Pairing Code Manually
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={handleDisconnectRelay}
-              disabled={bridge.connectionMode !== 'relay'}
-              style={{
-                height: 44,
-                borderRadius: 12,
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: bridge.connectionMode === 'relay' ? '#DC2626' : '#E7E5E4',
-              }}
-            >
-              <Text
+            {isRelayMode ? (
+              <Pressable
+                onPress={handleDisconnectRelay}
                 style={{
-                  color: bridge.connectionMode === 'relay' ? '#FFFFFF' : '#A8A29E',
-                  fontSize: 14,
-                  fontWeight: '600',
+                  height: 44,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: '#DC2626',
                 }}
               >
-                Disconnect Pairing
-              </Text>
-            </Pressable>
+                <Text
+                  style={{
+                    color: '#FFFFFF',
+                    fontSize: 14,
+                    fontWeight: '600',
+                  }}
+                >
+                  Disconnect Pairing
+                </Text>
+              </Pressable>
+            ) : null}
             <View style={{ rowGap: 8, paddingTop: 4 }}>
               <Text style={{ color: '#1C1917', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 }}>
                 Server URL
@@ -342,7 +396,7 @@ export default function SettingsScreen() {
                 }}
               />
               <Text style={{ color: '#A8A29E', fontSize: 12 }}>
-                WebSocket endpoint, e.g. ws://hostname:8787/ws
+                WebSocket endpoint, e.g. ws://hostname:8787/ws or ws://mac-studio:8787/ws (Tailscale)
               </Text>
             </View>
           </View>
