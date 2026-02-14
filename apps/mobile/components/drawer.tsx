@@ -387,17 +387,15 @@ export function Drawer() {
             marginBottom: 40,
             height: 46,
             borderRadius: 12,
-            borderWidth: 1,
-            borderColor: 'rgba(0,0,0,0.07)',
-            backgroundColor: '#FFFFFF',
+            backgroundColor: '#E7E5E4',
             flexDirection: 'row',
             alignItems: 'center',
             justifyContent: 'center',
             columnGap: 8,
           }}
         >
-          <FontAwesome name="sliders" size={14} color="#57534E" />
-          <Text style={{ color: '#1C1917', fontSize: 14, fontWeight: '600' }}>Settings</Text>
+          <FontAwesome name="sliders" size={14} color="#44403C" />
+          <Text style={{ color: '#1C1917', fontSize: 14, fontWeight: '700' }}>Settings</Text>
         </Pressable>
 
         {isBrowserOpen ? (
