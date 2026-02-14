@@ -13,12 +13,24 @@ const DRAWER_ANIMATION_MS = 220;
 
 type DrawerView = 'list' | 'new';
 
+function projectPathKey(projectPath: string): string {
+  const trimmed = projectPath.trim();
+  if (trimmed === '/' || trimmed === '\\') return '/';
+  return trimmed.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+}
+
 export function Drawer() {
   const { width } = useWindowDimensions();
   const bridge = useBridge();
   const drawer = useDrawer();
   const [view, setView] = useState<DrawerView>('list');
   const [folderPath, setFolderPath] = useState('');
+  const [isBrowserOpen, setIsBrowserOpen] = useState(false);
+  const [browserPath, setBrowserPath] = useState<string | null>(null);
+  const [browserParentPath, setBrowserParentPath] = useState<string | null>(null);
+  const [browserDirectories, setBrowserDirectories] = useState<Array<{ name: string; path: string }>>([]);
+  const [browserSuggestedRoots, setBrowserSuggestedRoots] = useState<string[]>([]);
+  const [isBrowserLoading, setIsBrowserLoading] = useState(false);
 
   const panelWidth = Math.min(width * 0.82, 420);
   const progress = useSharedValue(0);
@@ -54,8 +66,36 @@ export function Drawer() {
     () => Object.fromEntries(bridge.projects.map((project) => [project.id, project.path])),
     [bridge.projects]
   );
+  const uniqueProjects = useMemo(() => {
+    const sorted = [...bridge.projects].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    const uniqueByPath = new Map<string, (typeof sorted)[number]>();
+    for (const project of sorted) {
+      const key = projectPathKey(project.path);
+      if (uniqueByPath.has(key)) continue;
+      uniqueByPath.set(key, project);
+    }
+    return Array.from(uniqueByPath.values());
+  }, [bridge.projects]);
 
   const canStartWithNewFolder = folderPath.trim().length > 0;
+  const canSelectBrowserPath = browserPath !== null && browserPath.trim().length > 0;
+
+  const loadFolders = (path?: string) => {
+    setIsBrowserLoading(true);
+    return bridge
+      .listFolders(path)
+      .then((result) => {
+        setBrowserPath(result.path);
+        setBrowserParentPath(result.parentPath);
+        setBrowserDirectories(result.directories);
+        setBrowserSuggestedRoots(result.suggestedRoots);
+      })
+      .finally(() => {
+        setIsBrowserLoading(false);
+      });
+  };
 
   const startWithProject = (projectPath: string) => {
     bridge.startConversation(projectPath);
@@ -209,7 +249,7 @@ export function Drawer() {
             </View>
 
             <View style={{ flex: 1, minHeight: 0 }}>
-              {bridge.projects.length > 0 && (
+              {uniqueProjects.length > 0 && (
                 <>
                   <Text
                     style={{
@@ -228,7 +268,7 @@ export function Drawer() {
                     contentInsetAdjustmentBehavior="automatic"
                     contentContainerStyle={{ paddingHorizontal: 10, rowGap: 6, paddingBottom: 16 }}
                   >
-                    {bridge.projects.map((project) => (
+                    {uniqueProjects.map((project) => (
                       <Pressable
                         key={project.id}
                         onPress={() => startWithProject(project.path)}
@@ -271,7 +311,7 @@ export function Drawer() {
                 <TextInput
                   value={folderPath}
                   onChangeText={setFolderPath}
-                  placeholder="/Users/you/dev/my-project"
+                  placeholder="~/dev/my-project"
                   autoCapitalize="none"
                   autoCorrect={false}
                   style={{
@@ -284,6 +324,32 @@ export function Drawer() {
                     color: '#1C1917',
                   }}
                 />
+                <Text
+                  style={{
+                    color: '#78716C',
+                    fontSize: 12,
+                    lineHeight: 18,
+                  }}
+                >
+                  Use a Mac folder path. `~/...` works.
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    setIsBrowserOpen(true);
+                    void loadFolders();
+                  }}
+                  style={{
+                    height: 38,
+                    borderRadius: 12,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: 1,
+                    borderColor: 'rgba(0,0,0,0.08)',
+                    backgroundColor: '#F8F7F5',
+                  }}
+                >
+                  <Text style={{ color: '#1C1917', fontSize: 13, fontWeight: '600' }}>Browse Mac Folders</Text>
+                </Pressable>
                 <Pressable
                   disabled={!canStartWithNewFolder}
                   onPress={() => {
@@ -329,6 +395,184 @@ export function Drawer() {
           <FontAwesome name="sliders" size={14} color="#57534E" />
           <Text style={{ color: '#1C1917', fontSize: 14, fontWeight: '600' }}>Settings</Text>
         </Pressable>
+
+        {isBrowserOpen ? (
+          <View
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              left: 0,
+              backgroundColor: 'rgba(0,0,0,0.3)',
+              justifyContent: 'center',
+              paddingHorizontal: 10,
+              paddingVertical: 24,
+            }}
+          >
+            <View
+              style={{
+                borderRadius: 16,
+                backgroundColor: '#FFFFFF',
+                borderWidth: 1,
+                borderColor: 'rgba(0,0,0,0.08)',
+                maxHeight: '88%',
+                overflow: 'hidden',
+              }}
+            >
+              <View
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  borderBottomWidth: 1,
+                  borderBottomColor: 'rgba(0,0,0,0.08)',
+                  rowGap: 4,
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Text style={{ color: '#1C1917', fontSize: 17, fontWeight: '700' }}>Browse Folders</Text>
+                  <Pressable
+                    onPress={() => setIsBrowserOpen(false)}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 999,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: '#E7E5E4',
+                    }}
+                  >
+                    <FontAwesome name="close" size={13} color="#57534E" />
+                  </Pressable>
+                </View>
+                <Text numberOfLines={1} style={{ color: '#78716C', fontSize: 12 }}>
+                  {browserPath ?? 'Loading...'}
+                </Text>
+                {browserSuggestedRoots.length > 0 ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingTop: 4 }}>
+                    {browserSuggestedRoots.map((candidate) => (
+                      <Pressable
+                        key={candidate}
+                        onPress={() => {
+                          void loadFolders(candidate);
+                        }}
+                        style={{
+                          maxWidth: '100%',
+                          borderRadius: 999,
+                          borderWidth: 1,
+                          borderColor: 'rgba(0,0,0,0.08)',
+                          backgroundColor: '#F8F7F5',
+                          paddingHorizontal: 10,
+                          paddingVertical: 4,
+                        }}
+                      >
+                        <Text numberOfLines={1} style={{ color: '#78716C', fontSize: 10, fontWeight: '600' }}>
+                          {candidate}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingTop: 10 }}>
+                <Pressable
+                  disabled={browserParentPath === null || isBrowserLoading}
+                  onPress={() => {
+                    if (!browserParentPath) return;
+                    void loadFolders(browserParentPath);
+                  }}
+                  style={{
+                    flex: 1,
+                    height: 36,
+                    borderRadius: 10,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: browserParentPath && !isBrowserLoading ? '#E7E5E4' : '#F5F5F4',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: browserParentPath && !isBrowserLoading ? '#1C1917' : '#A8A29E',
+                      fontSize: 12,
+                      fontWeight: '600',
+                    }}
+                  >
+                    Up One Level
+                  </Text>
+                </Pressable>
+                <Pressable
+                  disabled={!canSelectBrowserPath || isBrowserLoading}
+                  onPress={() => {
+                    if (!browserPath) return;
+                    setFolderPath(browserPath);
+                    setIsBrowserOpen(false);
+                  }}
+                  style={{
+                    flex: 1,
+                    height: 36,
+                    borderRadius: 10,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: canSelectBrowserPath && !isBrowserLoading ? '#1C1917' : '#D6D3D1',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: canSelectBrowserPath && !isBrowserLoading ? '#FFFFFF' : '#78716C',
+                      fontSize: 12,
+                      fontWeight: '700',
+                    }}
+                  >
+                    Use This Folder
+                  </Text>
+                </Pressable>
+              </View>
+
+              <ScrollView
+                contentInsetAdjustmentBehavior="automatic"
+                contentContainerStyle={{ paddingHorizontal: 12, paddingTop: 10, paddingBottom: 12, rowGap: 6 }}
+              >
+                {isBrowserLoading ? (
+                  <View style={{ paddingVertical: 20, alignItems: 'center' }}>
+                    <Text style={{ color: '#78716C', fontSize: 13 }}>Loading...</Text>
+                  </View>
+                ) : null}
+                {!isBrowserLoading && browserDirectories.length === 0 ? (
+                  <View style={{ paddingVertical: 16, paddingHorizontal: 4 }}>
+                    <Text style={{ color: '#78716C', fontSize: 12 }}>No subfolders found.</Text>
+                  </View>
+                ) : null}
+                {!isBrowserLoading
+                  ? browserDirectories.map((directory) => (
+                      <Pressable
+                        key={directory.path}
+                        onPress={() => {
+                          void loadFolders(directory.path);
+                        }}
+                        style={{
+                          borderRadius: 10,
+                          borderWidth: 1,
+                          borderColor: 'rgba(0,0,0,0.06)',
+                          backgroundColor: '#FAFAF9',
+                          paddingHorizontal: 10,
+                          paddingVertical: 9,
+                          rowGap: 2,
+                        }}
+                      >
+                        <Text numberOfLines={1} style={{ color: '#1C1917', fontSize: 13, fontWeight: '600' }}>
+                          {directory.name}
+                        </Text>
+                        <Text numberOfLines={1} style={{ color: '#78716C', fontSize: 11 }}>
+                          {directory.path}
+                        </Text>
+                      </Pressable>
+                    ))
+                  : null}
+              </ScrollView>
+            </View>
+          </View>
+        ) : null}
       </Animated.View>
     </View>
   );

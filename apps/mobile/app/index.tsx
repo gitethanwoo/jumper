@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import Feather from '@expo/vector-icons/Feather';
-import { Stack } from 'expo-router';
+import { Stack, router } from 'expo-router';
 import Markdown, { type MarkdownProps } from 'react-native-markdown-display';
 import * as ImagePicker from 'expo-image-picker';
 
@@ -28,10 +28,34 @@ type PendingImage = {
   mimeType: string;
 };
 
+type BrowserDirectory = {
+  name: string;
+  path: string;
+};
+
+type ResumeFolder = {
+  path: string;
+  conversationCount: number;
+};
+
+function projectPathKey(projectPath: string): string {
+  const trimmed = projectPath.trim();
+  if (trimmed === '/' || trimmed === '\\') return '/';
+  return trimmed.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+}
+
 export default function ChatScreen() {
   const bridge = useBridge();
   const drawer = useDrawer();
   const [draft, setDraft] = useState('');
+  const [starterFolderPath, setStarterFolderPath] = useState('');
+  const [isFolderBrowserOpen, setIsFolderBrowserOpen] = useState(false);
+  const [browserPath, setBrowserPath] = useState<string | null>(null);
+  const [browserParentPath, setBrowserParentPath] = useState<string | null>(null);
+  const [browserDirectories, setBrowserDirectories] = useState<BrowserDirectory[]>([]);
+  const [browserSuggestedRoots, setBrowserSuggestedRoots] = useState<string[]>([]);
+  const [resumeFolders, setResumeFolders] = useState<ResumeFolder[]>([]);
+  const [isBrowserLoading, setIsBrowserLoading] = useState(false);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true);
@@ -62,10 +86,40 @@ export default function ChatScreen() {
     () => bridge.allChats.find((chat) => chat.id === chatId) ?? null,
     [bridge.allChats, chatId]
   );
+  const projectById = useMemo(
+    () => Object.fromEntries(bridge.projects.map((project) => [project.id, project])),
+    [bridge.projects]
+  );
   const activeProjectPath = useMemo(() => {
     if (!activeChat) return null;
-    return bridge.projects.find((project) => project.id === activeChat.projectId)?.path ?? null;
-  }, [activeChat, bridge.projects]);
+    return projectById[activeChat.projectId]?.path ?? null;
+  }, [activeChat, projectById]);
+  const recentProjects = useMemo(
+    () => {
+      const sorted = [...bridge.projects].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      const uniqueByPath = new Map<string, (typeof sorted)[number]>();
+      for (const project of sorted) {
+        const key = projectPathKey(project.path);
+        if (uniqueByPath.has(key)) continue;
+        uniqueByPath.set(key, project);
+      }
+      return Array.from(uniqueByPath.values()).slice(0, 4);
+    },
+    [bridge.projects]
+  );
+  const recentChats = useMemo(
+    () =>
+      [...bridge.allChats]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(0, 4),
+    [bridge.allChats]
+  );
+  const canStartFromPath = starterFolderPath.trim().length > 0;
+  const canSelectBrowserPath = browserPath !== null && browserPath.trim().length > 0;
+  const isBridgeConnected = bridge.status === 'connected';
+  const isBridgeConnecting = bridge.status === 'connecting';
   const messages = chatId ? bridge.messagesByChatId[chatId] ?? [] : [];
   const events = chatId ? bridge.eventsByChatId[chatId] ?? [] : [];
   const isChatResponding = chatId ? bridge.isRespondingByChatId[chatId] === true : false;
@@ -334,6 +388,44 @@ export default function ChatScreen() {
       });
   }, [draft, pendingImage, isUploadingImage, bridge, scrollToLatest]);
 
+  const handleStartFromPath = useCallback(() => {
+    const folderPath = starterFolderPath.trim();
+    if (folderPath.length === 0) return;
+    bridge.startConversation(folderPath);
+    setStarterFolderPath('');
+  }, [bridge, starterFolderPath]);
+
+  const loadFolders = useCallback(
+    (path?: string) => {
+      setIsBrowserLoading(true);
+      return bridge
+        .listFolders(path)
+        .then((result) => {
+          setBrowserPath(result.path);
+          setBrowserParentPath(result.parentPath);
+          setBrowserDirectories(result.directories);
+          setBrowserSuggestedRoots(result.suggestedRoots);
+          setResumeFolders(result.resumeFolders);
+        })
+        .finally(() => {
+          setIsBrowserLoading(false);
+        });
+    },
+    [bridge]
+  );
+
+  const openFolderBrowser = useCallback(() => {
+    setIsFolderBrowserOpen(true);
+    void loadFolders();
+  }, [loadFolders]);
+
+  const selectCurrentFolderFromBrowser = useCallback(() => {
+    if (!canSelectBrowserPath || !browserPath) return;
+    bridge.startConversation(browserPath);
+    setStarterFolderPath('');
+    setIsFolderBrowserOpen(false);
+  }, [bridge, browserPath, canSelectBrowserPath]);
+
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
@@ -350,6 +442,12 @@ export default function ChatScreen() {
     },
     []
   );
+
+  useEffect(() => {
+    if (!isBridgeConnected || chatId) return;
+    if (resumeFolders.length > 0) return;
+    void loadFolders();
+  }, [chatId, isBridgeConnected, loadFolders, resumeFolders.length]);
 
   useEffect(() => {
     if (!chatId) return;
@@ -410,50 +508,510 @@ export default function ChatScreen() {
             ),
           }}
         />
-        <View
-          style={{
-            flex: 1,
-            alignItems: 'center',
-            justifyContent: 'center',
-            paddingHorizontal: 40,
-            backgroundColor: palette.background,
-          }}
+        <ScrollView
+          style={{ flex: 1, backgroundColor: palette.background }}
+          contentInsetAdjustmentBehavior="automatic"
+          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 28, rowGap: 12 }}
         >
           <View
             style={{
-              width: 64,
-              height: 64,
+              borderRadius: 18,
+              borderWidth: 1,
+              borderColor: palette.border,
+              backgroundColor: '#FFFFFF',
+              paddingHorizontal: 16,
+              paddingVertical: 16,
+              rowGap: 10,
+            }}
+          >
+            <View
+              style={{
+                width: 48,
+                height: 48,
+                borderRadius: 12,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: palette.surface,
+              }}
+            >
+              <FontAwesome name="folder-open" size={20} color={colors.tint} />
+            </View>
+            <Text
+              style={{
+                color: palette.text,
+                fontSize: 22,
+                fontWeight: '700',
+              }}
+            >
+              {isBridgeConnected ? 'Start a Claude session' : isBridgeConnecting ? 'Connecting to your Mac...' : 'Connect your Mac first'}
+            </Text>
+            <Text
+              style={{
+                color: palette.textMuted,
+                fontSize: 15,
+                lineHeight: 22,
+              }}
+            >
+              {isBridgeConnected
+                ? 'Choose a folder to begin, or jump into an existing conversation.'
+                : 'Run npx jumper-app on your Mac, then scan the QR code to finish setup.'}
+            </Text>
+            <View
+              style={{
+                alignSelf: 'flex-start',
+                flexDirection: 'row',
+                alignItems: 'center',
+                columnGap: 6,
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+                borderRadius: 999,
+                backgroundColor: '#F5F5F4',
+              }}
+            >
+              <View
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 999,
+                  backgroundColor: isBridgeConnected ? '#0D9488' : isBridgeConnecting ? '#D97706' : '#DC2626',
+                }}
+              />
+              <Text style={{ color: palette.textMuted, fontSize: 12, fontWeight: '600' }}>
+                {isBridgeConnected ? 'Connected' : isBridgeConnecting ? 'Connecting' : 'Not connected'}
+              </Text>
+            </View>
+            {!isBridgeConnected ? (
+              <Pressable
+                onPress={() => {
+                  router.navigate('/settings');
+                }}
+                style={{
+                  height: 40,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: '#1C1917',
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '700' }}>Open Setup</Text>
+              </Pressable>
+            ) : null}
+          </View>
+
+          <View
+            style={{
+              borderRadius: 18,
+              borderWidth: 1,
+              borderColor: palette.border,
+              backgroundColor: '#FFFFFF',
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              rowGap: 10,
+            }}
+          >
+            <Text
+              style={{
+                color: palette.text,
+                fontSize: 12,
+                fontWeight: '700',
+                letterSpacing: 0.6,
+                textTransform: 'uppercase',
+              }}
+            >
+              Folder Path
+            </Text>
+            <TextInput
+              value={starterFolderPath}
+              onChangeText={setStarterFolderPath}
+              placeholder="~/dev/project"
+              placeholderTextColor={palette.textSubtle}
+              autoCapitalize="none"
+              autoCorrect={false}
+              className="h-[44px] rounded-xl px-4 bg-sf-bg text-sf-text text-[15px] border border-sf-sep"
+            />
+            <Text
+              style={{
+                color: palette.textMuted,
+                fontSize: 12,
+                lineHeight: 18,
+              }}
+            >
+              {isBridgeConnected
+                ? 'Enter a folder path on your Mac. `~/...` is supported.'
+                : 'Connect your Mac first. Then browse folders or enter a path.'}
+            </Text>
+            <Pressable
+              onPress={openFolderBrowser}
+              disabled={!isBridgeConnected}
+              style={{
+                height: 40,
+                borderRadius: 12,
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderWidth: 1,
+                borderColor: palette.border,
+                backgroundColor: isBridgeConnected ? '#F8F7F5' : '#F1F5F9',
+              }}
+            >
+              <Text style={{ color: isBridgeConnected ? palette.text : palette.textSubtle, fontSize: 14, fontWeight: '600' }}>
+                Browse Mac Folders
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={handleStartFromPath}
+              disabled={!canStartFromPath || !isBridgeConnected}
+              style={{
+                height: 44,
+                borderRadius: 12,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: canStartFromPath && isBridgeConnected ? '#1C1917' : '#D6D3D1',
+              }}
+            >
+              <Text
+                style={{
+                  color: canStartFromPath && isBridgeConnected ? '#FFFFFF' : '#78716C',
+                  fontSize: 15,
+                  fontWeight: '700',
+                }}
+              >
+                Start From Folder
+              </Text>
+            </Pressable>
+          </View>
+
+          {recentProjects.length > 0 ? (
+            <View
+              style={{
+                borderRadius: 18,
+                borderWidth: 1,
+                borderColor: palette.border,
+                backgroundColor: '#FFFFFF',
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+                rowGap: 8,
+              }}
+            >
+              <Text
+                style={{
+                  color: palette.text,
+                  fontSize: 12,
+                  fontWeight: '700',
+                  letterSpacing: 0.6,
+                  textTransform: 'uppercase',
+                }}
+              >
+                Existing Folders
+              </Text>
+              {recentProjects.map((project) => (
+                <Pressable
+                  key={project.id}
+                  onPress={() => bridge.startConversation(project.path)}
+                  style={{
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: 'rgba(0,0,0,0.06)',
+                    backgroundColor: '#FAFAF9',
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    rowGap: 3,
+                  }}
+                >
+                  <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
+                    {project.name}
+                  </Text>
+                  <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
+                    {project.path}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+
+          {resumeFolders.length > 0 ? (
+            <View
+              style={{
+                borderRadius: 18,
+                borderWidth: 1,
+                borderColor: palette.border,
+                backgroundColor: '#FFFFFF',
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+                rowGap: 8,
+              }}
+            >
+              <Text
+                style={{
+                  color: palette.text,
+                  fontSize: 12,
+                  fontWeight: '700',
+                  letterSpacing: 0.6,
+                  textTransform: 'uppercase',
+                }}
+              >
+                Pick Up Where You Left Off
+              </Text>
+              {resumeFolders.map((folder) => (
+                <Pressable
+                  key={folder.path}
+                  onPress={() => bridge.startConversation(folder.path)}
+                  style={{
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: 'rgba(0,0,0,0.06)',
+                    backgroundColor: '#FAFAF9',
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    rowGap: 3,
+                  }}
+                >
+                  <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
+                    {folder.path}
+                  </Text>
+                  <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
+                    {folder.conversationCount} previous conversations
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+
+          {recentChats.length > 0 ? (
+            <View
+              style={{
+                borderRadius: 18,
+                borderWidth: 1,
+                borderColor: palette.border,
+                backgroundColor: '#FFFFFF',
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+                rowGap: 8,
+              }}
+            >
+              <Text
+                style={{
+                  color: palette.text,
+                  fontSize: 12,
+                  fontWeight: '700',
+                  letterSpacing: 0.6,
+                  textTransform: 'uppercase',
+                }}
+              >
+                Recent Conversations
+              </Text>
+              {recentChats.map((chat) => (
+                <Pressable
+                  key={chat.id}
+                  onPress={() => bridge.selectChat(chat.id)}
+                  style={{
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: 'rgba(0,0,0,0.06)',
+                    backgroundColor: '#FAFAF9',
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    rowGap: 3,
+                  }}
+                >
+                  <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
+                    {chat.title}
+                  </Text>
+                  <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
+                    {projectById[chat.projectId]?.path ?? 'Unknown folder'}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+
+          <Pressable
+            onPress={drawer.open}
+            style={{
+              height: 42,
               borderRadius: 16,
               alignItems: 'center',
               justifyContent: 'center',
-              marginBottom: 16,
-              backgroundColor: palette.surface,
+              borderWidth: 1,
+              borderColor: palette.border,
+              backgroundColor: '#FFFFFF',
             }}
           >
-            <FontAwesome name="comments" size={26} color={colors.tint} />
+            <Text style={{ color: palette.textMuted, fontSize: 13, fontWeight: '600' }}>Open Full Menu</Text>
+          </Pressable>
+        </ScrollView>
+        {isFolderBrowserOpen ? (
+          <View
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              left: 0,
+              backgroundColor: 'rgba(0,0,0,0.32)',
+              justifyContent: 'center',
+              paddingHorizontal: 14,
+              paddingVertical: 24,
+            }}
+          >
+            <View
+              style={{
+                borderRadius: 18,
+                backgroundColor: '#FFFFFF',
+                borderWidth: 1,
+                borderColor: palette.border,
+                maxHeight: '88%',
+                overflow: 'hidden',
+              }}
+            >
+              <View
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 12,
+                  borderBottomWidth: 1,
+                  borderBottomColor: palette.border,
+                  rowGap: 4,
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Text style={{ color: palette.text, fontSize: 18, fontWeight: '700' }}>Browse Folders</Text>
+                  <Pressable
+                    onPress={() => setIsFolderBrowserOpen(false)}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 999,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: '#E7E5E4',
+                    }}
+                  >
+                    <FontAwesome name="close" size={14} color="#57534E" />
+                  </Pressable>
+                </View>
+                <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 12 }}>
+                  {browserPath ?? 'Loading...'}
+                </Text>
+                {browserSuggestedRoots.length > 0 ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingTop: 4 }}>
+                    {browserSuggestedRoots.map((candidate) => (
+                      <Pressable
+                        key={candidate}
+                        onPress={() => {
+                          void loadFolders(candidate);
+                        }}
+                        style={{
+                          maxWidth: '100%',
+                          borderRadius: 999,
+                          borderWidth: 1,
+                          borderColor: palette.border,
+                          backgroundColor: '#F8F7F5',
+                          paddingHorizontal: 10,
+                          paddingVertical: 5,
+                        }}
+                      >
+                        <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 11, fontWeight: '600' }}>
+                          {candidate}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingTop: 10 }}>
+                <Pressable
+                  disabled={browserParentPath === null || isBrowserLoading}
+                  onPress={() => {
+                    if (!browserParentPath) return;
+                    void loadFolders(browserParentPath);
+                  }}
+                  style={{
+                    flex: 1,
+                    height: 38,
+                    borderRadius: 10,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: browserParentPath && !isBrowserLoading ? '#E7E5E4' : '#F5F5F4',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: browserParentPath && !isBrowserLoading ? '#1C1917' : '#A8A29E',
+                      fontSize: 13,
+                      fontWeight: '600',
+                    }}
+                  >
+                    Up One Level
+                  </Text>
+                </Pressable>
+                <Pressable
+                  disabled={!canSelectBrowserPath || isBrowserLoading}
+                  onPress={selectCurrentFolderFromBrowser}
+                  style={{
+                    flex: 1,
+                    height: 38,
+                    borderRadius: 10,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: canSelectBrowserPath && !isBrowserLoading ? '#1C1917' : '#D6D3D1',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: canSelectBrowserPath && !isBrowserLoading ? '#FFFFFF' : '#78716C',
+                      fontSize: 13,
+                      fontWeight: '700',
+                    }}
+                  >
+                    Start Here
+                  </Text>
+                </Pressable>
+              </View>
+
+              <ScrollView
+                contentInsetAdjustmentBehavior="automatic"
+                contentContainerStyle={{ paddingHorizontal: 12, paddingTop: 10, paddingBottom: 14, rowGap: 6 }}
+              >
+                {isBrowserLoading ? (
+                  <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+                    <ActivityIndicator color="#B45309" />
+                  </View>
+                ) : null}
+                {!isBrowserLoading && browserDirectories.length === 0 ? (
+                  <View style={{ paddingVertical: 18, paddingHorizontal: 6 }}>
+                    <Text style={{ color: palette.textMuted, fontSize: 13 }}>No subfolders found.</Text>
+                  </View>
+                ) : null}
+                {!isBrowserLoading
+                  ? browserDirectories.map((directory) => (
+                      <Pressable
+                        key={directory.path}
+                        onPress={() => {
+                          void loadFolders(directory.path);
+                        }}
+                        style={{
+                          borderRadius: 10,
+                          borderWidth: 1,
+                          borderColor: 'rgba(0,0,0,0.06)',
+                          backgroundColor: '#FAFAF9',
+                          paddingHorizontal: 11,
+                          paddingVertical: 10,
+                          rowGap: 2,
+                        }}
+                      >
+                        <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
+                          {directory.name}
+                        </Text>
+                        <Text numberOfLines={1} style={{ color: palette.textMuted, fontSize: 11 }}>
+                          {directory.path}
+                        </Text>
+                      </Pressable>
+                    ))
+                  : null}
+              </ScrollView>
+            </View>
           </View>
-          <Text
-            style={{
-              color: palette.text,
-              fontSize: 20,
-              fontWeight: '700',
-              textAlign: 'center',
-              marginBottom: 8,
-            }}
-          >
-            No Active Chat
-          </Text>
-          <Text
-            style={{
-              color: palette.textMuted,
-              fontSize: 15,
-              lineHeight: 24,
-              textAlign: 'center',
-            }}
-          >
-            Open the menu to start a conversation{'\n'}from any folder path.
-          </Text>
-        </View>
+        ) : null}
       </>
     );
   }
