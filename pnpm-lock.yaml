@@ -72,6 +72,9 @@ importers:
       expo-font:
         specifier: ~55.0.3
         version: 55.0.3(expo@55.0.0-preview.10)(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.13)(react@19.2.0))(react@19.2.0)
+      expo-haptics:
+        specifier: ~55.0.5
+        version: 55.0.5(expo@55.0.0-preview.10)
       expo-image-picker:
         specifier: ^55.0.5
         version: 55.0.5(expo@55.0.0-preview.10)
@@ -2353,6 +2356,11 @@ packages:
       expo: '*'
       react: '*'
       react-native: '*'
+
+  expo-haptics@55.0.5:
+    resolution: {integrity: sha512-8bUIjxLtET5290p0WKyMQ8S3lvxMFEOdbA3GHt07QhgPf0eqeCtsH8/+g+ojtVT9RieZM9dZBHiqofdKpwCQfg==}
+    peerDependencies:
+      expo: '*'
 
   expo-image-loader@55.0.0:
     resolution: {integrity: sha512-NOjp56wDrfuA5aiNAybBIjqIn1IxKeGJ8CECWZncQ/GzjZfyTYAHTCyeApYkdKkMBLHINzI4BbTGSlbCa0fXXQ==}
@@ -6551,6 +6559,10 @@ snapshots:
       expo: 55.0.0-preview.10(@babel/core@7.29.0)(@expo/dom-webview@55.0.3)(@expo/metro-runtime@55.0.5)(expo-router@55.0.0-preview.7)(react-dom@19.2.0(react@19.2.0))(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.13)(react@19.2.0))(react@19.2.0)
       react: 19.2.0
       react-native: 0.83.1(@babel/core@7.29.0)(@types/react@19.2.13)(react@19.2.0)
+
+  expo-haptics@55.0.5(expo@55.0.0-preview.10):
+    dependencies:
+      expo: 55.0.0-preview.10(@babel/core@7.29.0)(@expo/dom-webview@55.0.3)(@expo/metro-runtime@55.0.5)(expo-router@55.0.0-preview.7)(react-dom@19.2.0(react@19.2.0))(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.13)(react@19.2.0))(react@19.2.0)
 
   expo-image-loader@55.0.0(expo@55.0.0-preview.10):
     dependencies:

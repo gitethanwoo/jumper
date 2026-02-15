@@ -19,6 +19,7 @@
     "expo-dev-client": "~55.0.5",
     "expo-file-system": "^55.0.5",
     "expo-font": "~55.0.3",
+    "expo-haptics": "~55.0.5",
     "expo-image-picker": "^55.0.5",
     "expo-linking": "~55.0.4",
     "expo-router": "55.0.0-preview.7",

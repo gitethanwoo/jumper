@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { hapticTap } from '@/lib/haptics';
 
 type DrawerContextValue = {
   isOpen: boolean;
@@ -15,9 +16,18 @@ export function DrawerProvider(props: { children: React.ReactNode }) {
   const value = useMemo<DrawerContextValue>(
     () => ({
       isOpen,
-      open: () => setIsOpen(true),
-      close: () => setIsOpen(false),
-      toggle: () => setIsOpen((prev) => !prev),
+      open: () => {
+        hapticTap();
+        setIsOpen(true);
+      },
+      close: () => {
+        hapticTap();
+        setIsOpen(false);
+      },
+      toggle: () => {
+        hapticTap();
+        setIsOpen((prev) => !prev);
+      },
     }),
     [isOpen]
   );

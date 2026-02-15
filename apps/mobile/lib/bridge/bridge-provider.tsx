@@ -14,6 +14,7 @@ import type {
 import * as ExtensionStore from './extension-storage';
 import * as RelayStore from './relay-storage';
 import * as Store from './storage';
+import { hapticAction, hapticSuccess, hapticTap, hapticWarning } from '@/lib/haptics';
 
 type Status = 'disconnected' | 'connecting' | 'connected';
 type ConnectionMode = 'direct' | 'relay';
@@ -349,6 +350,9 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
 
     if (msg.type === 'chats.cancel.result') {
       setIsStoppingByChatId((prev) => ({ ...prev, [msg.chatId]: msg.accepted }));
+      if (msg.accepted) {
+        hapticWarning();
+      }
       return;
     }
 
@@ -504,15 +508,18 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     relaySessionRef.current = null;
 
     connectOrReconnect({ mode: 'direct', url: nextServerUrl });
+    hapticSuccess();
     return true;
   };
 
   const selectChat = (chatId: string) => {
+    hapticTap();
     setActiveChatId(chatId);
     sendOrQueue({ type: 'chats.history', chatId });
   };
 
   const deselectChat = () => {
+    hapticTap();
     setActiveChatId(null);
   };
 
@@ -536,6 +543,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       }
     }
 
+    hapticAction();
     sendOrQueue({ type: 'projects.create', name: projectName, path });
   };
 
@@ -561,6 +569,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       pendingPairRef.current = { resolve, reject };
       connectOrReconnect({ mode: 'relay', url: relayUrlFromCode(normalizedCode) });
     });
+    hapticSuccess();
   };
 
   const disconnectRelay = async () => {
@@ -574,6 +583,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     rejectPendingPair('Relay disconnected');
     setConnectionMode('direct');
     wsRef.current?.close();
+    hapticWarning();
   };
 
   const uploadImageForActiveChat = async (input: {
@@ -661,6 +671,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     );
     setIsRespondingByChatId((prev) => ({ ...prev, [chatId]: true }));
     setIsStoppingByChatId((prev) => ({ ...prev, [chatId]: false }));
+    hapticAction();
     sendOrQueue({
       type: 'chats.send',
       chatId,
@@ -675,6 +686,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     if (isRespondingByChatId[chatId] !== true) return false;
     if (isStoppingByChatId[chatId] === true) return true;
     setIsStoppingByChatId((prev) => ({ ...prev, [chatId]: true }));
+    hapticWarning();
     sendOrQueue({ type: 'chats.cancel', chatId });
     return true;
   };
