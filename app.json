@@ -1,5 +1,3 @@
 {
-  "plugins": [
-    "@bacons/apple-targets"
-  ]
+  "plugins": []
 }

@@ -186,6 +186,7 @@ export function parseToolRuns(events: unknown[]): ToolRun[] {
   const runs: ToolRun[] = [];
   let toolsById = new Map<string, ToolCall>();
   let toolOrder: string[] = [];
+  const codexAgentToolIdByThreadId = new Map<string, string>();
   let turnOpen = false;
   let currentTurnIndex = -1;
 
@@ -327,6 +328,16 @@ export function parseToolRuns(events: unknown[]): ToolRun[] {
     return match[1]?.trim() || undefined;
   };
 
+  const codexAgentOutput = (agentsStates: unknown): string | undefined => {
+    if (!isObject(agentsStates)) return undefined;
+    const messages = Object.values(agentsStates)
+      .filter(isObject)
+      .map((state) => (typeof state.message === 'string' ? state.message.trim() : ''))
+      .filter((message) => message.length > 0);
+    if (messages.length === 0) return undefined;
+    return truncate(messages.join('\n\n'), 1200);
+  };
+
   const flushRun = (eventIndex: number) => {
     if (toolOrder.length === 0) {
       turnOpen = false;
@@ -343,6 +354,78 @@ export function parseToolRuns(events: unknown[]): ToolRun[] {
 
   events.forEach((rawEvent, index) => {
     if (!isObject(rawEvent) || typeof rawEvent.type !== 'string') return;
+
+    if ((rawEvent.type === 'item.started' || rawEvent.type === 'item.completed') && isObject(rawEvent.item)) {
+      const item = rawEvent.item;
+      if (item.type === 'command_execution') {
+        const id = typeof item.id === 'string' ? item.id : `codex-command:${index}`;
+        const command = typeof item.command === 'string' ? item.command : undefined;
+        if (rawEvent.type === 'item.started') {
+          startTool({ id, name: 'Shell', inputSummary: command });
+          return;
+        }
+
+        const exitCode = typeof item.exit_code === 'number' ? item.exit_code : null;
+        const output = typeof item.aggregated_output === 'string' ? truncate(item.aggregated_output, 1200) : undefined;
+        completeTool({
+          id,
+          status: exitCode === 0 ? 'success' : 'error',
+          output,
+          fallbackName: 'Shell',
+        });
+        return;
+      }
+
+      if (item.type === 'collab_tool_call') {
+        const id = typeof item.id === 'string' ? item.id : `codex-collab:${index}`;
+        const toolName = typeof item.tool === 'string' ? item.tool : 'collab';
+        const prompt = typeof item.prompt === 'string' ? item.prompt : undefined;
+        const receiverThreadIds = Array.isArray(item.receiver_thread_ids)
+          ? item.receiver_thread_ids.filter((threadId): threadId is string => typeof threadId === 'string')
+          : [];
+
+        if (toolName === 'spawn_agent') {
+          if (rawEvent.type === 'item.started') {
+            startTool({
+              id,
+              name: 'Task',
+              inputSummary: prompt,
+              taskInput: prompt ? { description: prompt, prompt } : undefined,
+            });
+            return;
+          }
+
+          receiverThreadIds.forEach((threadId) => codexAgentToolIdByThreadId.set(threadId, id));
+          const existing = toolsById.get(id);
+          registerTool({
+            id,
+            name: 'Task',
+            status: existing?.status ?? 'running',
+            inputSummary: existing?.inputSummary ?? prompt,
+            taskInput: existing?.taskInput ?? (prompt ? { description: prompt, prompt } : undefined),
+            output: existing?.output,
+            parentId: existing?.parentId,
+          });
+          turnOpen = true;
+          return;
+        }
+
+        if (toolName === 'wait' && rawEvent.type === 'item.completed') {
+          const output = codexAgentOutput(item.agents_states);
+          receiverThreadIds.forEach((threadId) => {
+            const agentToolId = codexAgentToolIdByThreadId.get(threadId);
+            if (!agentToolId) return;
+            completeTool({ id: agentToolId, status: 'success', output, fallbackName: 'Task' });
+          });
+          return;
+        }
+      }
+
+      if (rawEvent.type === 'item.completed' && item.type === 'agent_message') {
+        flushRun(index);
+      }
+      return;
+    }
 
     if (rawEvent.type === 'assistant' && isObject(rawEvent.message)) {
       const parsed = processAssistantBlocks(rawEvent.message.content, index);
@@ -431,6 +514,14 @@ export function parseTurnMessages(events: unknown[]): ParsedTurnMessages {
 
   events.forEach((rawEvent, eventIndex) => {
     if (!isObject(rawEvent) || typeof rawEvent.type !== 'string') return;
+
+    if (rawEvent.type === 'item.completed' && isObject(rawEvent.item)) {
+      if (rawEvent.item.type !== 'agent_message') return;
+      if (typeof rawEvent.item.text !== 'string' || rawEvent.item.text.trim().length === 0) return;
+      if (currentTurnIndex < 0) currentTurnIndex = 0;
+      assistant.push({ turnIndex: currentTurnIndex, eventIndex, text: truncate(rawEvent.item.text.trim(), 2400) });
+      return;
+    }
 
     if (rawEvent.type === 'user' && isObject(rawEvent.message)) {
       const content = rawEvent.message.content;

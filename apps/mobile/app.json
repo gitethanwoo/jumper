@@ -15,12 +15,6 @@
     "ios": {
       "bundleIdentifier": "com.ethanwoo.ccbridge",
       "appleTeamId": "NSJPQ3TSBT",
-      "entitlements": {
-        "com.apple.security.application-groups": [
-          "group.com.ethanwoo.ccbridge",
-          "group.com.ethanwoo.ccbridge"
-        ]
-      },
       "icon": "./assets/app-icon.icon",
       "supportsTablet": true,
       "infoPlist": {
@@ -55,8 +49,7 @@
         {
           "photosPermission": "Allow Jumper to select images to send to Claude."
         }
-      ],
-      "@bacons/apple-targets"
+      ]
     ],
     "experiments": {
       "typedRoutes": true
@@ -64,23 +57,6 @@
     "extra": {
       "router": {},
       "eas": {
-        "build": {
-          "experimental": {
-            "ios": {
-              "appExtensions": [
-                {
-                  "bundleIdentifier": "com.ethanwoo.ccbridge.keyboard",
-                  "targetName": "keyboard",
-                  "entitlements": {
-                    "com.apple.security.application-groups": [
-                      "group.com.ethanwoo.ccbridge"
-                    ]
-                  }
-                }
-              ]
-            }
-          }
-        },
         "projectId": "0ce5bbcc-76ea-4406-8784-5e3a6d1f0e11"
       }
     },

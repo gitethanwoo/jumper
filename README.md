@@ -1,6 +1,6 @@
 # Jumper
 
-Jumper is a mobile client for Claude Code. It pairs a local Node.js bridge server — which spawns the `claude` CLI in headless JSON-streaming mode — with an Expo/React Native iOS app that connects over WebSocket, letting you chat with Claude about any project folder on your Mac from your phone. You create projects by pointing at a local directory, start conversations within them, and get real-time streamed responses with full tool-run visibility, markdown rendering, and image attachments, all routed through `ws://your-mac:8787/ws`.
+Jumper is a mobile client for Claude Code and Codex. It pairs a local Node.js bridge server — which spawns the selected agent CLI in headless JSON-streaming mode — with an Expo/React Native iOS app that connects over WebSocket, letting you chat about any project folder on your Mac from your phone. You create projects by pointing at a local directory, start conversations within them, and get real-time streamed responses with full tool-run visibility, markdown rendering, and image attachments, all routed through `ws://your-mac:8787/ws`.
 
 ## Run The Bridge Server
 
@@ -15,6 +15,12 @@ Repo dev mode:
 ```sh
 cd <repo-root>
 pnpm -C apps/bridge-server dev
+```
+
+Claude is the default agent. To run the bridge against Codex instead:
+
+```sh
+JUMPER_AGENT=codex pnpm -C apps/bridge-server dev
 ```
 
 The server prints:

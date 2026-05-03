@@ -11,7 +11,6 @@ import type {
   RelayControlMessage,
   ServerToClient,
 } from './types';
-import * as ExtensionStore from './extension-storage';
 import * as RelayStore from './relay-storage';
 import * as Store from './storage';
 import { hapticAction, hapticSuccess, hapticTap, hapticWarning } from '@/lib/haptics';
@@ -36,6 +35,7 @@ type BridgeState = {
   isStoppingByChatId: Record<string, boolean>;
 
   setServerUrl: (url: string) => Promise<void>;
+  connectDirect: (url?: string) => Promise<void>;
   handleConnectLink: (url: string) => Promise<boolean>;
   pairWithCode: (code: string) => Promise<void>;
   disconnectRelay: () => Promise<void>;
@@ -155,6 +155,16 @@ function appendAssistantDelta(
   return { ...prev, [chatId]: [...msgs.slice(0, -1), updated] };
 }
 
+function appendAssistantMessage(
+  prev: Record<string, ChatMessage[]>,
+  chatId: string,
+  text: string
+): Record<string, ChatMessage[]> {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return prev;
+  return pushMessage(prev, chatId, { id: nextId('a'), role: 'assistant', text: trimmed });
+}
+
 function normalizeFolderPath(input: string): string {
   const trimmed = input.trim();
   if (trimmed === '/' || trimmed === '\\') return trimmed;
@@ -227,7 +237,6 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     setServerUrlState(url);
     serverUrlRef.current = url;
     await Store.setServerUrl(url);
-    ExtensionStore.setSharedBridgeServerUrl(url);
   };
 
   const sendOrQueue = (msg: ClientToServer) => {
@@ -329,6 +338,13 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
               setMessagesByChatId((prev) => appendAssistantDelta(prev, msg.chatId, text));
             }
           }
+        }
+      }
+      if (isObject(e) && e.type === 'item.completed' && isObject(e.item)) {
+        const item = e.item;
+        if (item.type === 'agent_message' && typeof item.text === 'string') {
+          const text = item.text;
+          setMessagesByChatId((prev) => appendAssistantMessage(prev, msg.chatId, text));
         }
       }
       return;
@@ -510,6 +526,18 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     connectOrReconnect({ mode: 'direct', url: nextServerUrl });
     hapticSuccess();
     return true;
+  };
+
+  const connectDirect = async (url?: string): Promise<void> => {
+    const nextServerUrl = (url ?? serverUrlRef.current).trim();
+    if (nextServerUrl.length === 0) throw new Error('Server URL is required');
+
+    await persistServerUrl(nextServerUrl);
+    await RelayStore.clearRelaySession();
+    relaySessionRef.current = null;
+
+    connectOrReconnect({ mode: 'direct', url: nextServerUrl });
+    hapticSuccess();
   };
 
   const selectChat = (chatId: string) => {
@@ -749,6 +777,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       setServerUrl: async (url: string) => {
         await persistServerUrl(url);
       },
+      connectDirect,
       handleConnectLink,
       pairWithCode,
       disconnectRelay,

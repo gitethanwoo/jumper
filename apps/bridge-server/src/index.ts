@@ -31,6 +31,7 @@ const PROJECTS_ROOT =
   process.env.PROJECTS_ROOT ?? path.join(os.homedir(), "dev", "jumper-projects");
 const CLAUDE_HISTORY_PATH = path.join(os.homedir(), ".claude", "history.jsonl");
 const CLAUDE_PROJECTS_PATH = path.join(os.homedir(), ".claude", "projects");
+const AGENT_PROVIDER = process.env.JUMPER_AGENT === "codex" ? "codex" : "claude";
 
 type ChatHistoryMessage = {
   id: string;
@@ -63,6 +64,8 @@ const MAX_SELECTED_TEXT_CHARS = 2_000;
 const MAX_CONTEXT_SIDE_CHARS = 1_000;
 const MAX_CONVERSATION_ENTRY_CHARS = 600;
 const MAX_CONVERSATION_ENTRIES = 12;
+
+type AgentProvider = "claude" | "codex";
 
 function slugify(name: string): string {
   const s = name
@@ -622,6 +625,13 @@ function extractClaudeResultText(event: unknown): string | null {
   return event.result;
 }
 
+function extractCodexAgentMessage(event: unknown): string | null {
+  if (!isObject(event) || event.type !== "item.completed") return null;
+  if (!isObject(event.item) || event.item.type !== "agent_message") return null;
+  if (typeof event.item.text !== "string") return null;
+  return event.item.text;
+}
+
 function runKeyboardPrompt(prompt: string): Promise<KeyboardRunOutcome> {
   return new Promise((resolve) => {
     const startedAt = Date.now();
@@ -631,19 +641,29 @@ function runKeyboardPrompt(prompt: string): Promise<KeyboardRunOutcome> {
     let lastStderr = "";
 
     const child = spawn(
-      "claude",
-      [
-        "-p",
-        prompt,
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--permission-mode",
-        "bypassPermissions",
-        "--tools",
-        "default",
-      ],
+      AGENT_PROVIDER === "codex" ? "codex" : "claude",
+      AGENT_PROVIDER === "codex"
+        ? [
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-c",
+            'approval_policy="never"',
+            "--skip-git-repo-check",
+            prompt,
+          ]
+        : [
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--permission-mode",
+            "bypassPermissions",
+            "--tools",
+            "default",
+          ],
       {
         cwd: PROJECTS_ROOT,
         stdio: ["ignore", "pipe", "pipe"],
@@ -660,6 +680,10 @@ function runKeyboardPrompt(prompt: string): Promise<KeyboardRunOutcome> {
     rlOut.on("line", (line) => {
       if (!line.trim()) return;
       const event: unknown = JSON.parse(line);
+      const codexMessage = extractCodexAgentMessage(event);
+      if (typeof codexMessage === "string") {
+        resultText = codexMessage;
+      }
       const result = extractClaudeResultText(event);
       if (typeof result === "string") {
         resultText = result;
@@ -777,6 +801,67 @@ function buildClaudePrompt(text: string, attachments: ChatAttachment[], projectP
   );
   const textPart = text.trim().length > 0 ? text : "Please analyze the attached image.";
   return `${textPart}\n\nAttached files:\n${attachmentLines.join("\n")}`;
+}
+
+function codexImageArgs(attachments: ChatAttachment[], projectPath: string): string[] {
+  return attachments.flatMap((attachment) => ["--image", path.join(projectPath, attachment.relativePath)]);
+}
+
+function buildChatAgentCommand(params: {
+  provider: AgentProvider;
+  prompt: string;
+  sessionId: string | null;
+  attachments: ChatAttachment[];
+  projectPath: string;
+}): { command: string; args: string[] } {
+  if (params.provider === "codex") {
+    if (params.sessionId) {
+      return {
+        command: "codex",
+        args: [
+          "exec",
+          "resume",
+          params.sessionId,
+          "--json",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "-c",
+          'approval_policy="never"',
+          ...codexImageArgs(params.attachments, params.projectPath),
+          params.prompt,
+        ],
+      };
+    }
+
+    return {
+      command: "codex",
+      args: [
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        'approval_policy="never"',
+        "--skip-git-repo-check",
+        ...codexImageArgs(params.attachments, params.projectPath),
+        params.prompt,
+      ],
+    };
+  }
+
+  const args: string[] = [];
+  if (params.sessionId) args.push("-r", params.sessionId);
+  args.push(
+    "-p",
+    params.prompt,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--permission-mode",
+    "bypassPermissions",
+    "--tools",
+    "default"
+  );
+  return { command: "claude", args };
 }
 
 function wsUrlForHost(hostWithPort: string, secure: boolean): string {
@@ -967,22 +1052,15 @@ async function main() {
       const projectPath = normalizeProjectPath(project.path);
       const prompt = buildClaudePrompt(msg.text, msg.attachments ?? [], projectPath);
 
-      const args: string[] = [];
-      if (chat.sessionId) args.push("-r", chat.sessionId);
-      args.push(
-        "-p",
+      const command = buildChatAgentCommand({
+        provider: AGENT_PROVIDER,
         prompt,
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--permission-mode",
-        "bypassPermissions",
-        "--tools",
-        "default",
-      );
+        sessionId: chat.sessionId,
+        attachments: msg.attachments ?? [],
+        projectPath,
+      });
 
-      const child = spawn("claude", args, {
+      const child = spawn(command.command, command.args, {
         cwd: projectPath,
         stdio: ["ignore", "pipe", "pipe"],
         env: process.env,
@@ -1001,6 +1079,20 @@ async function main() {
           const existing = state.chats[idx];
           if (!existing) return;
           const updated = { ...existing, sessionId: maybe.session_id };
+          state = {
+            ...state,
+            chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],
+          };
+          await saveState(state);
+        }
+
+        const codexMaybe = event as { type?: unknown; thread_id?: unknown };
+        if (codexMaybe.type === "thread.started" && typeof codexMaybe.thread_id === "string") {
+          const idx = state.chats.findIndex((c) => c.id === chat.id);
+          if (idx === -1) return;
+          const existing = state.chats[idx];
+          if (!existing) return;
+          const updated = { ...existing, sessionId: codexMaybe.thread_id };
           state = {
             ...state,
             chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],

@@ -9,12 +9,12 @@
     "web": "expo start --web"
   },
   "dependencies": {
-    "@bacons/apple-targets": "^4.0.2",
     "@expo/vector-icons": "^15.0.3",
     "@react-navigation/native": "^7.1.8",
     "@tailwindcss/postcss": "^4.1.18",
     "clsx": "^2.1.1",
     "expo": "55.0.0-preview.10",
+    "expo-clipboard": "~55.0.6",
     "expo-constants": "~55.0.4",
     "expo-dev-client": "~55.0.5",
     "expo-file-system": "^55.0.5",
