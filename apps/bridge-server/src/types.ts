@@ -10,11 +10,17 @@ export type Project = {
   createdAt: string;
 };
 
+export type AgentProvider = "claude" | "codex";
+
+export type AgentSessions = Partial<Record<AgentProvider, string>>;
+
 export type Chat = {
   id: string;
   projectId: string;
   title: string;
-  sessionId: string | null;
+  sessionId?: string | null;
+  activeAgent: AgentProvider;
+  agentSessions: AgentSessions;
   createdAt: string;
 };
 
@@ -158,6 +164,7 @@ export type ChatsCreateMessage = {
   type: "chats.create";
   projectId: string;
   title: string;
+  agent?: AgentProvider;
 };
 export type ChatsHistoryMessage = { type: "chats.history"; chatId: string };
 export type ChatsSendMessage = {
@@ -165,6 +172,8 @@ export type ChatsSendMessage = {
   chatId: string;
   text: string;
   attachments?: ChatAttachment[];
+  agent?: AgentProvider;
+  mode?: "normal" | "consult";
 };
 export type ChatsCancelMessage = { type: "chats.cancel"; chatId: string };
 export type UploadImageMessage = {

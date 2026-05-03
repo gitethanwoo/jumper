@@ -13,6 +13,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { RelayClient } from "./relay-client.js";
 import { loadRelaySession, nowIso, loadState, saveRelaySession, saveState } from "./state.js";
 import type {
+  AgentProvider,
+  Chat,
   ChatAttachment,
   ClientToServer,
   KeyboardConversationContext,
@@ -32,6 +34,16 @@ const PROJECTS_ROOT =
 const CLAUDE_HISTORY_PATH = path.join(os.homedir(), ".claude", "history.jsonl");
 const CLAUDE_PROJECTS_PATH = path.join(os.homedir(), ".claude", "projects");
 const AGENT_PROVIDER = process.env.JUMPER_AGENT === "codex" ? "codex" : "claude";
+const CLAUDE_COMMAND =
+  process.env.CLAUDE_COMMAND ??
+  (existsSync(path.join(os.homedir(), ".local", "bin", "claude"))
+    ? path.join(os.homedir(), ".local", "bin", "claude")
+    : "claude");
+const CODEX_COMMAND =
+  process.env.CODEX_COMMAND ??
+  (existsSync(path.join(os.homedir(), ".local", "bin", "codex"))
+    ? path.join(os.homedir(), ".local", "bin", "codex")
+    : "codex");
 
 type ChatHistoryMessage = {
   id: string;
@@ -44,6 +56,14 @@ type UploadImageBody = {
   fileName: string;
   mimeType: string;
   base64: string;
+};
+
+type AgentStatus = {
+  provider: AgentProvider;
+  command: string;
+  available: boolean;
+  version: string | null;
+  error: string | null;
 };
 
 type KeyboardRunOutcome =
@@ -64,8 +84,6 @@ const MAX_SELECTED_TEXT_CHARS = 2_000;
 const MAX_CONTEXT_SIDE_CHARS = 1_000;
 const MAX_CONVERSATION_ENTRY_CHARS = 600;
 const MAX_CONVERSATION_ENTRIES = 12;
-
-type AgentProvider = "claude" | "codex";
 
 function slugify(name: string): string {
   const s = name
@@ -103,6 +121,70 @@ function normalizeProjectPath(input: string): string {
   return path.resolve(os.homedir(), expanded);
 }
 
+function normalizeAgent(value: unknown): AgentProvider {
+  return value === "codex" ? "codex" : "claude";
+}
+
+function normalizeChat(chat: Chat): Chat {
+  let activeAgent = normalizeAgent(chat.activeAgent);
+  const agentSessions = { ...(chat.agentSessions ?? {}) };
+  if (typeof chat.sessionId === "string" && !agentSessions[activeAgent]) {
+    agentSessions[activeAgent] = chat.sessionId;
+  }
+  const sessionAgents = Object.keys(agentSessions) as AgentProvider[];
+  const onlySessionAgent = sessionAgents[0];
+  if (!agentSessions[activeAgent] && sessionAgents.length === 1 && onlySessionAgent) {
+    activeAgent = onlySessionAgent;
+  }
+
+  return {
+    ...chat,
+    activeAgent,
+    agentSessions,
+    sessionId: agentSessions[activeAgent] ?? null,
+  };
+}
+
+function chatSessionId(chat: Chat, agent: AgentProvider): string | null {
+  return chat.agentSessions[agent] ?? (chat.activeAgent === agent ? chat.sessionId ?? null : null);
+}
+
+function isEmptyPlaceholderChat(chat: Chat): boolean {
+  const normalized = normalizeChat(chat);
+  return normalized.title === "New conversation" && Object.keys(normalized.agentSessions).length === 0;
+}
+
+async function pruneEmptyPlaceholderChats(state: State): Promise<State> {
+  const chats = state.chats.filter((chat) => !isEmptyPlaceholderChat(chat));
+  if (chats.length === state.chats.length) return state;
+  const next = { ...state, chats };
+  await saveState(next);
+  return next;
+}
+
+function chatTitleFromPrompt(text: string): string {
+  const compact = text
+    .split(/\s+/)
+    .join(" ")
+    .trim();
+  if (compact.length === 0) return "New conversation";
+  return compact.length > 54 ? `${compact.slice(0, 51)}...` : compact;
+}
+
+async function updateChatTitleFromPrompt(state: State, chatId: string, text: string): Promise<State> {
+  const idx = state.chats.findIndex((c) => c.id === chatId);
+  if (idx === -1) return state;
+  const existing = state.chats[idx];
+  if (!existing || existing.title !== "New conversation") return state;
+  const updated = { ...existing, title: chatTitleFromPrompt(text) };
+  const next = {
+    ...state,
+    chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],
+  };
+  await saveState(next);
+  return next;
+}
+
 async function normalizeStateProjectPaths(state: State): Promise<State> {
   const normalizedProjects = state.projects.map((project) => {
     const normalizedPath = normalizeProjectPath(project.path);
@@ -110,10 +192,21 @@ async function normalizeStateProjectPaths(state: State): Promise<State> {
     return { ...project, path: normalizedPath };
   });
 
-  const changed = normalizedProjects.some((project, index) => project !== state.projects[index]);
+  const normalizedChats = state.chats.map(normalizeChat);
+  const projectsChanged = normalizedProjects.some((project, index) => project !== state.projects[index]);
+  const chatsChanged = normalizedChats.some((chat, index) => {
+    const previous = state.chats[index];
+    return (
+      !previous ||
+      chat.activeAgent !== previous.activeAgent ||
+      chat.sessionId !== previous.sessionId ||
+      JSON.stringify(chat.agentSessions) !== JSON.stringify(previous.agentSessions)
+    );
+  });
+  const changed = projectsChanged || chatsChanged;
   if (!changed) return state;
 
-  const next = { ...state, projects: normalizedProjects };
+  const next = { ...state, projects: normalizedProjects, chats: normalizedChats };
   await saveState(next);
   return next;
 }
@@ -817,7 +910,7 @@ function buildChatAgentCommand(params: {
   if (params.provider === "codex") {
     if (params.sessionId) {
       return {
-        command: "codex",
+        command: CODEX_COMMAND,
         args: [
           "exec",
           "resume",
@@ -833,7 +926,7 @@ function buildChatAgentCommand(params: {
     }
 
     return {
-      command: "codex",
+      command: CODEX_COMMAND,
       args: [
         "exec",
         "--json",
@@ -861,7 +954,49 @@ function buildChatAgentCommand(params: {
     "--tools",
     "default"
   );
-  return { command: "claude", args };
+  return { command: CLAUDE_COMMAND, args };
+}
+
+function checkAgentCommand(provider: AgentProvider, command: string): Promise<AgentStatus> {
+  return new Promise((resolve) => {
+    const child = spawn(command, ["--version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.on("error", (error) => {
+      resolve({
+        provider,
+        command,
+        available: false,
+        version: null,
+        error: error.message,
+      });
+    });
+    child.on("exit", (exitCode) => {
+      const output = Buffer.concat(stdout).toString("utf8").trim();
+      const errorOutput = Buffer.concat(stderr).toString("utf8").trim();
+      resolve({
+        provider,
+        command,
+        available: exitCode === 0,
+        version: output.length > 0 ? output : null,
+        error: exitCode === 0 ? null : errorOutput || `Exited with code ${exitCode}`,
+      });
+    });
+  });
+}
+
+async function checkAgents(): Promise<Record<AgentProvider, AgentStatus>> {
+  const [claude, codex] = await Promise.all([
+    checkAgentCommand("claude", CLAUDE_COMMAND),
+    checkAgentCommand("codex", CODEX_COMMAND),
+  ]);
+  return { claude, codex };
 }
 
 function wsUrlForHost(hostWithPort: string, secure: boolean): string {
@@ -896,6 +1031,7 @@ async function main() {
     type: "terminal",
     small: true,
   });
+  const agentStatuses = await checkAgents();
 
   const active = new Map<string, ReturnType<typeof spawn>>();
   const cancelTimers = new Map<string, NodeJS.Timeout>();
@@ -930,6 +1066,7 @@ async function main() {
     }
 
     if (msg.type === "chats.list") {
+      state = await pruneEmptyPlaceholderChats(state);
       const chats = msg.projectId ? state.chats.filter((c) => c.projectId === msg.projectId) : state.chats;
       reply({ type: "chats.list.result", chats });
       return;
@@ -939,11 +1076,13 @@ async function main() {
       const project = state.projects.find((p) => p.id === msg.projectId);
       if (!project) throw new Error("Unknown project");
 
-      const chat = {
+      const chat: Chat = {
         id: crypto.randomUUID(),
         projectId: msg.projectId,
         title: msg.title,
         sessionId: null,
+        activeAgent: msg.agent ?? AGENT_PROVIDER,
+        agentSessions: {},
         createdAt: nowIso(),
       };
       state = { ...state, chats: [...state.chats, chat] };
@@ -956,8 +1095,10 @@ async function main() {
     if (msg.type === "chats.history") {
       const chat = state.chats.find((c) => c.id === msg.chatId);
       if (!chat) throw new Error("Unknown chat");
+      const normalizedChat = normalizeChat(chat);
+      const activeSessionId = chatSessionId(normalizedChat, normalizedChat.activeAgent);
 
-      if (!chat.sessionId) {
+      if (!activeSessionId) {
         reply({ type: "chats.history.result", chatId: chat.id, messages: [], events: [] });
         return;
       }
@@ -966,7 +1107,7 @@ async function main() {
       if (!project) throw new Error("Unknown project");
 
       const projectPath = normalizeProjectPath(project.path);
-      const history = await loadClaudeHistory(projectPath, chat.sessionId);
+      const history = await loadClaudeHistory(projectPath, activeSessionId);
       reply({
         type: "chats.history.result",
         chatId: chat.id,
@@ -1044,6 +1185,8 @@ async function main() {
     if (msg.type === "chats.send") {
       const chat = state.chats.find((c) => c.id === msg.chatId);
       if (!chat) throw new Error("Unknown chat");
+      const normalizedChat = normalizeChat(chat);
+      const targetAgent = msg.agent ?? normalizedChat.activeAgent;
 
       if (active.has(chat.id)) throw new Error("Chat is busy");
 
@@ -1051,11 +1194,26 @@ async function main() {
       if (!project) throw new Error("Unknown project");
       const projectPath = normalizeProjectPath(project.path);
       const prompt = buildClaudePrompt(msg.text, msg.attachments ?? [], projectPath);
+      state = await updateChatTitleFromPrompt(state, chat.id, msg.text);
+      reply({
+        type: "claude.event",
+        chatId: chat.id,
+        event: {
+          type: "user",
+          message: {
+            role: "user",
+            content:
+              msg.mode === "consult"
+                ? `Ask ${targetAgent === "codex" ? "Codex" : "Claude"}:\n${msg.text}`
+                : msg.text,
+          },
+        },
+      });
 
       const command = buildChatAgentCommand({
-        provider: AGENT_PROVIDER,
+        provider: targetAgent,
         prompt,
-        sessionId: chat.sessionId,
+        sessionId: chatSessionId(normalizedChat, targetAgent),
         attachments: msg.attachments ?? [],
         projectPath,
       });
@@ -1072,32 +1230,33 @@ async function main() {
         const event: unknown = JSON.parse(line);
         reply({ type: "claude.event", chatId: chat.id, event });
 
-        const maybe = event as { type?: unknown; subtype?: unknown; session_id?: unknown };
-        if (maybe.type === "system" && maybe.subtype === "init" && typeof maybe.session_id === "string") {
+        const saveAgentSession = async (sessionId: string) => {
           const idx = state.chats.findIndex((c) => c.id === chat.id);
           if (idx === -1) return;
           const existing = state.chats[idx];
           if (!existing) return;
-          const updated = { ...existing, sessionId: maybe.session_id };
+          const existingNormalized = normalizeChat(existing);
+          const agentSessions = { ...existingNormalized.agentSessions, [targetAgent]: sessionId };
+          const updated = normalizeChat({
+            ...existingNormalized,
+            agentSessions,
+            sessionId: agentSessions[existingNormalized.activeAgent] ?? null,
+          });
           state = {
             ...state,
             chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],
           };
           await saveState(state);
+        };
+
+        const maybe = event as { type?: unknown; subtype?: unknown; session_id?: unknown };
+        if (maybe.type === "system" && maybe.subtype === "init" && typeof maybe.session_id === "string") {
+          await saveAgentSession(maybe.session_id);
         }
 
         const codexMaybe = event as { type?: unknown; thread_id?: unknown };
         if (codexMaybe.type === "thread.started" && typeof codexMaybe.thread_id === "string") {
-          const idx = state.chats.findIndex((c) => c.id === chat.id);
-          if (idx === -1) return;
-          const existing = state.chats[idx];
-          if (!existing) return;
-          const updated = { ...existing, sessionId: codexMaybe.thread_id };
-          state = {
-            ...state,
-            chats: [...state.chats.slice(0, idx), updated, ...state.chats.slice(idx + 1)],
-          };
-          await saveState(state);
+          await saveAgentSession(codexMaybe.thread_id);
         }
       };
 
@@ -1118,6 +1277,25 @@ async function main() {
         rlErr.close();
         reply({ type: "claude.done", chatId: chat.id, exitCode, signal });
       });
+      child.on("error", (error) => {
+        active.delete(chat.id);
+        const cancelTimer = cancelTimers.get(chat.id);
+        if (cancelTimer) {
+          clearTimeout(cancelTimer);
+          cancelTimers.delete(chat.id);
+        }
+        rlOut.close();
+        rlErr.close();
+        reply({
+          type: "claude.event",
+          chatId: chat.id,
+          event: {
+            type: "stderr",
+            line: `Failed to start ${targetAgent}: ${error.message}`,
+          },
+        });
+        reply({ type: "claude.done", chatId: chat.id, exitCode: 127, signal: null });
+      });
 
       return;
     }
@@ -1136,7 +1314,7 @@ async function main() {
       (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader) ?? `localhost:${PORT}`;
 
     if (req.method === "GET" && requestUrl.pathname === "/health") {
-      jsonResponse(res, 200, { ok: true, serverVersion: "0.1.0" });
+      jsonResponse(res, 200, { ok: true, serverVersion: "0.1.0", agents: agentStatuses });
       return;
     }
 
@@ -1408,6 +1586,14 @@ async function main() {
     httpServer.listen(PORT, HOST, () => resolve());
   });
   console.log("Bridge started.\n");
+  for (const status of [agentStatuses.claude, agentStatuses.codex]) {
+    if (status.available) {
+      console.log(`✓ ${status.provider}: ${status.version ?? status.command}`);
+    } else {
+      console.log(`✗ ${status.provider}: ${status.error ?? "Unavailable"} (${status.command})`);
+    }
+  }
+  console.log("");
   console.log(startupQr);
 }
 

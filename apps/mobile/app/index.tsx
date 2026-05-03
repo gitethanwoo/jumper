@@ -16,6 +16,7 @@ import * as ImagePicker from 'expo-image-picker';
 
 import { Pressable, ScrollView, Text, TextInput, View } from '@/tw';
 import { useBridge } from '@/lib/bridge/bridge-provider';
+import type { AgentProvider, Chat } from '@/lib/bridge/types';
 import Colors from '@/constants/Colors';
 import { parseToolRuns, parseTurnMessages } from '@/lib/bridge/tool-runs';
 import { ToolRunBlock } from '@/components/tool-run-block';
@@ -42,6 +43,40 @@ type ResumeFolder = {
   conversationCount: number;
 };
 
+const AGENTS: AgentProvider[] = ['claude', 'codex'];
+
+function agentLabel(agent: AgentProvider): string {
+  return agent === 'codex' ? 'Codex' : 'Claude';
+}
+
+const agentMarks = {
+  claude: require('@/assets/brand/claude-symbol.png'),
+  codex: require('@/assets/brand/openai-symbol.png'),
+} satisfies Record<AgentProvider, number>;
+
+function AgentMark(props: { agent: AgentProvider; size?: number }) {
+  const size = props.size ?? 14;
+  return (
+    <Image
+      source={agentMarks[props.agent]}
+      style={{ width: size, height: size }}
+      resizeMode="contain"
+    />
+  );
+}
+
+function chatDisplayTitle(chat: Chat, projectPath: string | undefined): string {
+  if (chat.title !== 'New conversation') return chat.title;
+  if (!projectPath) return chat.title;
+  const normalized = projectPath.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter((segment) => segment.length > 0);
+  return segments.at(-1) ?? chat.title;
+}
+
+function isEmptyPlaceholderChat(chat: Chat): boolean {
+  return chat.title === 'New conversation' && Object.keys(chat.agentSessions).length === 0;
+}
+
 export default function ChatScreen() {
   const bridge = useBridge();
   const drawer = useDrawer();
@@ -56,6 +91,7 @@ export default function ChatScreen() {
   const [isBrowserLoading, setIsBrowserLoading] = useState(false);
   const [isPathInputVisible, setIsPathInputVisible] = useState(false);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [newChatAgent, setNewChatAgent] = useState<AgentProvider>('codex');
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -76,6 +112,8 @@ export default function ChatScreen() {
   const prevContentKeyRef = useRef<string | null>(null);
   const trimmedDraft = draft.trim();
   const isStopCommand = trimmedDraft === 'stop' || trimmedDraft === '/stop';
+  const activeAgent = bridge.activeAgent;
+  const consultAgent: AgentProvider = activeAgent === 'codex' ? 'claude' : 'codex';
 
   const chatId = bridge.activeChatId;
   const activeChat = useMemo(
@@ -93,6 +131,7 @@ export default function ChatScreen() {
   const recentChats = useMemo(
     () =>
       [...bridge.allChats]
+        .filter((chat) => !isEmptyPlaceholderChat(chat))
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
         .slice(0, 4),
     [bridge.allChats]
@@ -107,6 +146,7 @@ export default function ChatScreen() {
   const isChatStopping = chatId ? bridge.isStoppingByChatId[chatId] === true : false;
   const canSendMessage =
     (trimmedDraft.length > 0 || pendingImage !== null) && !isUploadingImage && !isChatResponding;
+  const canConsult = trimmedDraft.length > 0 && pendingImage === null && !isUploadingImage && !isChatResponding;
   const canSendStopCommand =
     isChatResponding &&
     !isChatStopping &&
@@ -413,12 +453,19 @@ export default function ChatScreen() {
     }
   }, [bridge, isStopCommand]);
 
+  const handleConsult = useCallback(() => {
+    if (!canConsult) return;
+    bridge.consultActiveChat(consultAgent, trimmedDraft);
+    setDraft('');
+    scrollToLatest(true);
+  }, [bridge, canConsult, consultAgent, scrollToLatest, trimmedDraft]);
+
   const handleStartFromPath = useCallback(() => {
     const folderPath = starterFolderPath.trim();
     if (folderPath.length === 0) return;
-    bridge.startConversation(folderPath);
+    bridge.startConversation(folderPath, newChatAgent);
     setStarterFolderPath('');
-  }, [bridge, starterFolderPath]);
+  }, [bridge, newChatAgent, starterFolderPath]);
 
   const loadFolders = useCallback(
     (path?: string) => {
@@ -446,10 +493,10 @@ export default function ChatScreen() {
 
   const selectCurrentFolderFromBrowser = useCallback(() => {
     if (!canSelectBrowserPath || !browserPath) return;
-    bridge.startConversation(browserPath);
+    bridge.startConversation(browserPath, newChatAgent);
     setStarterFolderPath('');
     setIsFolderBrowserOpen(false);
-  }, [bridge, browserPath, canSelectBrowserPath]);
+  }, [bridge, browserPath, canSelectBrowserPath, newChatAgent]);
 
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -523,7 +570,7 @@ export default function ChatScreen() {
             ),
             headerTitle: () => (
               <View style={{ alignItems: 'center' }}>
-                <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700', letterSpacing: -0.3 }}>Claude</Text>
+                <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700', letterSpacing: -0.3 }}>Jumper</Text>
               </View>
             ),
           }}
@@ -585,7 +632,7 @@ export default function ChatScreen() {
               }}
             >
               {isBridgeConnected
-                ? 'Pick a folder on your Mac to start working with Claude.'
+                ? `Choose an agent, then pick a folder on your Mac to start a ${agentLabel(newChatAgent)} session.`
                 : 'Run npx jumper-app on your Mac, then scan the QR code.'}
             </Text>
             <View
@@ -632,6 +679,50 @@ export default function ChatScreen() {
           {/* ── Action cards ── */}
           {isBridgeConnected ? (
             <View style={{ paddingHorizontal: 16, paddingTop: 20, rowGap: 10 }}>
+              <View
+                style={{
+                  borderRadius: 16,
+                  backgroundColor: '#FFFFFF',
+                  borderWidth: 1,
+                  borderColor: palette.border,
+                  padding: 6,
+                  flexDirection: 'row',
+                  columnGap: 6,
+                }}
+              >
+                {AGENTS.map((agent) => {
+                  const selected = newChatAgent === agent;
+                  return (
+                    <Pressable
+                      key={agent}
+                      onPress={() => setNewChatAgent(agent)}
+                      style={{
+                        flex: 1,
+                        height: 42,
+                        borderRadius: 12,
+                        flexDirection: 'row',
+                        columnGap: 6,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: selected ? '#F0EDE9' : 'transparent',
+                        borderWidth: selected ? 1 : 0,
+                        borderColor: selected ? 'rgba(0,0,0,0.08)' : 'transparent',
+                      }}
+                    >
+                      <AgentMark agent={agent} size={14} />
+                      <Text
+                        style={{
+                          color: selected ? palette.text : palette.textMuted,
+                          fontSize: 14,
+                          fontWeight: '800',
+                        }}
+                      >
+                        {agentLabel(agent)}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
               {/* Browse folders card */}
               <Pressable
                 onPress={openFolderBrowser}
@@ -784,7 +875,7 @@ export default function ChatScreen() {
                 {resumeFolders.map((folder) => (
                   <Pressable
                     key={folder.path}
-                    onPress={() => bridge.startConversation(folder.path)}
+                    onPress={() => bridge.startConversation(folder.path, newChatAgent)}
                     style={{
                       borderRadius: 14,
                       borderWidth: 1,
@@ -867,14 +958,14 @@ export default function ChatScreen() {
                         backgroundColor: '#FFF7ED',
                       }}
                     >
-                      <Feather name="message-circle" size={15} color="#B45309" />
+                      <AgentMark agent={chat.activeAgent} size={16} />
                     </View>
                     <View style={{ flex: 1, rowGap: 2 }}>
                       <Text numberOfLines={1} style={{ color: palette.text, fontSize: 14, fontWeight: '600' }}>
-                        {chat.title}
+                        {chatDisplayTitle(chat, projectById[chat.projectId]?.path)}
                       </Text>
                       <Text numberOfLines={1} style={{ color: palette.textSubtle, fontSize: 12 }}>
-                        {projectById[chat.projectId]?.path ?? 'Unknown folder'}
+                        {agentLabel(chat.activeAgent)} - {projectById[chat.projectId]?.path ?? 'Unknown folder'}
                       </Text>
                     </View>
                     <Feather name="chevron-right" size={16} color={palette.textSubtle} />
@@ -1095,7 +1186,18 @@ export default function ChatScreen() {
           ),
           headerTitle: () => (
             <View style={{ alignItems: 'center' }}>
-              <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700' }}>Chat</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 7 }}>
+                <AgentMark agent={activeAgent} size={15} />
+                <Text
+                  style={{
+                    color: palette.text,
+                    fontSize: 17,
+                    fontWeight: '700',
+                  }}
+                >
+                  {agentLabel(activeAgent)}
+                </Text>
+              </View>
               <Text
                 numberOfLines={1}
                 style={{ color: palette.textSubtle, fontSize: 11, lineHeight: 14, maxWidth: 220 }}
@@ -1103,6 +1205,31 @@ export default function ChatScreen() {
                 {activeProjectPath ?? 'No folder selected'}
               </Text>
             </View>
+          ),
+          headerRight: () => (
+            <Pressable
+              disabled={!canConsult}
+              onPress={handleConsult}
+              style={{
+                height: 34,
+                borderRadius: 999,
+                paddingHorizontal: 12,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: canConsult ? '#FEF3C7' : palette.surface,
+              }}
+            >
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: canConsult ? '#92400E' : palette.textSubtle,
+                  fontSize: 12,
+                  fontWeight: '700',
+                }}
+              >
+                Ask {agentLabel(consultAgent)}
+              </Text>
+            </Pressable>
           ),
         }}
       />
@@ -1342,7 +1469,7 @@ export default function ChatScreen() {
             <TextInput
               value={draft}
               onChangeText={setDraft}
-              placeholder="Message Claude…"
+              placeholder={`Message ${agentLabel(activeAgent)}...`}
               placeholderTextColor={colors.tabIconDefault}
               selectionColor={colors.tint}
               keyboardAppearance="light"

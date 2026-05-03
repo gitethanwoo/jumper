@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 
 import type {
+  AgentProvider,
   Chat,
   ChatAttachment,
   FolderListResult,
@@ -33,6 +34,7 @@ type BridgeState = {
   eventsByChatId: Record<string, unknown[]>;
   isRespondingByChatId: Record<string, boolean>;
   isStoppingByChatId: Record<string, boolean>;
+  activeAgent: AgentProvider;
 
   setServerUrl: (url: string) => Promise<void>;
   connectDirect: (url?: string) => Promise<void>;
@@ -42,7 +44,7 @@ type BridgeState = {
 
   selectChat: (chatId: string) => void;
   deselectChat: () => void;
-  startConversation: (folderPath: string) => void;
+  startConversation: (folderPath: string, agent?: AgentProvider) => void;
   listFolders: (path?: string) => Promise<FolderListResult>;
 
   uploadImageForActiveChat: (input: {
@@ -51,6 +53,7 @@ type BridgeState = {
     mimeType: string;
   }) => Promise<ChatAttachment>;
   sendToActiveChat: (text: string, attachments?: ChatAttachment[]) => void;
+  consultActiveChat: (agent: AgentProvider, text: string) => void;
   interruptActiveChat: () => boolean;
   cancelActiveChat: () => boolean;
 };
@@ -59,6 +62,7 @@ const BridgeContext = React.createContext<BridgeState | null>(null);
 
 type PendingConversation = {
   title: string;
+  agent: AgentProvider;
 };
 
 type PendingPair = {
@@ -186,6 +190,40 @@ function serverUrlFromConnectLink(url: string): string | null {
   return server.trim();
 }
 
+function normalizeAgent(value: unknown): AgentProvider {
+  return value === 'codex' ? 'codex' : 'claude';
+}
+
+function normalizeChat(chat: Chat): Chat {
+  let activeAgent = normalizeAgent(chat.activeAgent);
+  const agentSessions = { ...(chat.agentSessions ?? {}) };
+  if (typeof chat.sessionId === 'string' && !agentSessions[activeAgent]) {
+    agentSessions[activeAgent] = chat.sessionId;
+  }
+  const sessionAgents = Object.keys(agentSessions) as AgentProvider[];
+  const onlySessionAgent = sessionAgents[0];
+  if (!agentSessions[activeAgent] && sessionAgents.length === 1 && onlySessionAgent) {
+    activeAgent = onlySessionAgent;
+  }
+  return {
+    ...chat,
+    activeAgent,
+    agentSessions,
+    sessionId: agentSessions[activeAgent] ?? null,
+  };
+}
+
+function isEmptyPlaceholderChat(chat: Chat): boolean {
+  const normalized = normalizeChat(chat);
+  return normalized.title === 'New conversation' && Object.keys(normalized.agentSessions).length === 0;
+}
+
+function chatTitleFromPrompt(text: string): string {
+  const compact = text.split(/\s+/).join(' ').trim();
+  if (compact.length === 0) return 'New conversation';
+  return compact.length > 54 ? `${compact.slice(0, 51)}...` : compact;
+}
+
 export function BridgeProvider(props: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>('disconnected');
   const [connectionModeState, setConnectionModeState] = useState<ConnectionMode>('direct');
@@ -202,6 +240,8 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const [eventsByChatId, setEventsByChatId] = useState<Record<string, unknown[]>>({});
   const [isRespondingByChatId, setIsRespondingByChatId] = useState<Record<string, boolean>>({});
   const [isStoppingByChatId, setIsStoppingByChatId] = useState<Record<string, boolean>>({});
+  const activeChat = allChats.find((chat) => chat.id === activeChatId) ?? null;
+  const activeAgent = activeChat?.activeAgent ?? 'claude';
 
   const wsRef = useRef<WebSocket | null>(null);
   const pendingRef = useRef<ClientToServer[]>([]);
@@ -298,20 +338,21 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       const pending = pendingConversationsRef.current[0];
       if (pending) {
         pendingConversationsRef.current = pendingConversationsRef.current.slice(1);
-        sendOrQueue({ type: 'chats.create', projectId: msg.project.id, title: pending.title });
+        sendOrQueue({ type: 'chats.create', projectId: msg.project.id, title: pending.title, agent: pending.agent });
       }
       return;
     }
 
     if (msg.type === 'chats.list.result') {
-      setAllChats(msg.chats);
+      setAllChats(msg.chats.map(normalizeChat));
       return;
     }
 
     if (msg.type === 'chats.create.result') {
       setAllChats((prev) => {
-        const withoutExisting = prev.filter((chat) => chat.id !== msg.chat.id);
-        return [...withoutExisting, msg.chat];
+        const chat = normalizeChat(msg.chat);
+        const withoutExisting = prev.filter((entry) => entry.id !== chat.id);
+        return [...withoutExisting, chat];
       });
       setActiveChatId(msg.chat.id);
       sendOrQueue({ type: 'chats.history', chatId: msg.chat.id });
@@ -548,17 +589,23 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
 
   const deselectChat = () => {
     hapticTap();
+    const chatId = activeChatId;
+    if (chatId) {
+      setAllChats((prev) =>
+        prev.filter((chat) => chat.id !== chatId || !isEmptyPlaceholderChat(chat))
+      );
+    }
     setActiveChatId(null);
   };
 
-  const startConversation = (folderPath: string) => {
+  const startConversation = (folderPath: string, agent: AgentProvider = 'codex') => {
     const path = normalizeFolderPath(folderPath);
     if (path.length === 0) throw new Error('Folder path is required');
 
     const projectName = basenameFromPath(path);
     pendingConversationsRef.current = [
       ...pendingConversationsRef.current,
-      { title: 'New conversation' },
+      { title: 'New conversation', agent },
     ];
 
     if (statusRef.current === 'disconnected') {
@@ -688,6 +735,13 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const sendToActiveChat = (text: string, attachments: ChatAttachment[] = []) => {
     const chatId = activeChatId;
     if (!chatId) throw new Error('No active chat');
+    setAllChats((prev) =>
+      prev.map((chat) =>
+        chat.id === chatId && chat.title === 'New conversation'
+          ? { ...chat, title: chatTitleFromPrompt(text) }
+          : chat
+      )
+    );
     const attachmentText = attachments.map((attachment) => `[Attached file: ${attachment.name}]`);
     const localText = [text, ...attachmentText].filter((part) => part.trim().length > 0).join('\n');
     setMessagesByChatId((prev) =>
@@ -705,6 +759,39 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       chatId,
       text,
       attachments: attachments.length > 0 ? attachments : undefined,
+    });
+  };
+
+  const consultActiveChat = (agent: AgentProvider, text: string) => {
+    const chatId = activeChatId;
+    if (!chatId) throw new Error('No active chat');
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    setAllChats((prev) =>
+      prev.map((chat) =>
+        chat.id === chatId && chat.title === 'New conversation'
+          ? { ...chat, title: chatTitleFromPrompt(trimmed) }
+          : chat
+      )
+    );
+
+    const label = agent === 'codex' ? 'Codex' : 'Claude';
+    setMessagesByChatId((prev) =>
+      pushMessage(prev, chatId, {
+        id: nextId('u'),
+        role: 'user',
+        text: `Ask ${label}:\n${trimmed}`,
+      })
+    );
+    setIsRespondingByChatId((prev) => ({ ...prev, [chatId]: true }));
+    setIsStoppingByChatId((prev) => ({ ...prev, [chatId]: false }));
+    hapticAction();
+    sendOrQueue({
+      type: 'chats.send',
+      chatId,
+      text: trimmed,
+      agent,
+      mode: 'consult',
     });
   };
 
@@ -773,6 +860,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       eventsByChatId,
       isRespondingByChatId,
       isStoppingByChatId,
+      activeAgent,
 
       setServerUrl: async (url: string) => {
         await persistServerUrl(url);
@@ -787,6 +875,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       listFolders,
       uploadImageForActiveChat,
       sendToActiveChat,
+      consultActiveChat,
       interruptActiveChat,
       cancelActiveChat,
     }),
@@ -802,6 +891,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       eventsByChatId,
       isRespondingByChatId,
       isStoppingByChatId,
+      activeAgent,
       handleConnectLink,
       pairWithCode,
       disconnectRelay,

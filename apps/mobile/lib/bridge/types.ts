@@ -5,11 +5,17 @@ export type Project = {
   createdAt: string;
 };
 
+export type AgentProvider = 'claude' | 'codex';
+
+export type AgentSessions = Partial<Record<AgentProvider, string>>;
+
 export type Chat = {
   id: string;
   projectId: string;
   title: string;
-  sessionId: string | null;
+  sessionId?: string | null;
+  activeAgent: AgentProvider;
+  agentSessions: AgentSessions;
   createdAt: string;
 };
 
@@ -87,9 +93,16 @@ export type ClientToServer =
   | { type: 'projects.list' }
   | { type: 'projects.create'; name: string; path?: string }
   | { type: 'chats.list'; projectId?: string }
-  | { type: 'chats.create'; projectId: string; title: string }
+  | { type: 'chats.create'; projectId: string; title: string; agent?: AgentProvider }
   | { type: 'chats.history'; chatId: string }
-  | { type: 'chats.send'; chatId: string; text: string; attachments?: ChatAttachment[] }
+  | {
+      type: 'chats.send';
+      chatId: string;
+      text: string;
+      attachments?: ChatAttachment[];
+      agent?: AgentProvider;
+      mode?: 'normal' | 'consult';
+    }
   | { type: 'chats.cancel'; chatId: string }
   | { type: 'upload-image'; chatId: string; fileName: string; mimeType: string; base64: string }
   | { type: 'folders.list'; requestId: string; path?: string };

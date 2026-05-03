@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useWindowDimensions } from 'react-native';
+import { Image, useWindowDimensions } from 'react-native';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import Feather from '@expo/vector-icons/Feather';
 import { router } from 'expo-router';
@@ -7,11 +7,38 @@ import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from '
 
 import { useBridge } from '@/lib/bridge/bridge-provider';
 import { useDrawer } from '@/lib/drawer-context';
+import type { AgentProvider, Chat } from '@/lib/bridge/types';
 import { Pressable, ScrollView, Text, TextInput, View } from '@/tw';
 
 const DRAWER_ANIMATION_MS = 220;
 
 type DrawerView = 'list' | 'new';
+
+const agentMarks = {
+  claude: require('@/assets/brand/claude-symbol.png'),
+  codex: require('@/assets/brand/openai-symbol.png'),
+} satisfies Record<AgentProvider, number>;
+
+function agentLabel(agent: AgentProvider): string {
+  return agent === 'codex' ? 'Codex' : 'Claude';
+}
+
+function AgentMark(props: { agent: AgentProvider; size?: number }) {
+  const size = props.size ?? 14;
+  return <Image source={agentMarks[props.agent]} style={{ width: size, height: size }} resizeMode="contain" />;
+}
+
+function chatDisplayTitle(chat: Chat, projectPath: string | undefined): string {
+  if (chat.title !== 'New conversation') return chat.title;
+  if (!projectPath) return chat.title;
+  const normalized = projectPath.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter((segment) => segment.length > 0);
+  return segments.at(-1) ?? chat.title;
+}
+
+function isEmptyPlaceholderChat(chat: Chat): boolean {
+  return chat.title === 'New conversation' && Object.keys(chat.agentSessions).length === 0;
+}
 
 function projectPathKey(projectPath: string): string {
   const trimmed = projectPath.trim();
@@ -56,9 +83,9 @@ export function Drawer() {
 
   const chats = useMemo(
     () =>
-      [...bridge.allChats].sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      ),
+      [...bridge.allChats]
+        .filter((chat) => !isEmptyPlaceholderChat(chat))
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [bridge.allChats]
   );
 
@@ -184,6 +211,7 @@ export function Drawer() {
                 ) : (
                   chats.map((chat) => {
                     const isActive = bridge.activeChatId === chat.id;
+                    const projectPath = projectPathById[chat.projectId];
                     return (
                       <Pressable
                         key={chat.id}
@@ -201,11 +229,14 @@ export function Drawer() {
                           rowGap: 4,
                         }}
                       >
-                        <Text numberOfLines={1} style={{ color: '#1C1917', fontSize: 14, fontWeight: '600' }}>
-                          {chat.title}
-                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 7 }}>
+                          <AgentMark agent={chat.activeAgent} size={13} />
+                          <Text numberOfLines={1} style={{ flex: 1, color: '#1C1917', fontSize: 14, fontWeight: '600' }}>
+                            {chatDisplayTitle(chat, projectPath)}
+                          </Text>
+                        </View>
                         <Text numberOfLines={1} style={{ color: '#78716C', fontSize: 12 }}>
-                          {projectPathById[chat.projectId] ?? 'Unknown project'}
+                          {agentLabel(chat.activeAgent)} - {projectPath ?? 'Unknown project'}
                         </Text>
                       </Pressable>
                     );
