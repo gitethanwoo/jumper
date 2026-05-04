@@ -60,6 +60,12 @@
         "projectId": "0ce5bbcc-76ea-4406-8784-5e3a6d1f0e11"
       }
     },
-    "owner": "athanir"
+    "owner": "athanir",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/0ce5bbcc-76ea-4406-8784-5e3a6d1f0e11"
+    }
   }
 }
