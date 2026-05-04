@@ -100,6 +100,57 @@ export type ChatsHistoryResult = {
   events: unknown[];
 };
 
+export type ChatsStatusResult = {
+  type: "chats.status.result";
+  chatId: string;
+  responding: boolean;
+};
+
+export type AgentTokenStats = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  reasoningOutputTokens: number;
+};
+
+export type AgentRateLimit = {
+  label: string;
+  usedPercent: number;
+  windowMinutes: number;
+  resetsAt: number | null;
+};
+
+export type AgentInfo = {
+  sessionId: string | null;
+  model: string | null;
+  cliVersion: string | null;
+  contextWindow: number | null;
+  costUsd: number | null;
+  tokens: AgentTokenStats;
+  rateLimits: AgentRateLimit[];
+};
+
+export type GitInfo = {
+  branch: string | null;
+  isWorktree: boolean;
+  worktreePath: string | null;
+  mainRepoPath: string | null;
+  dirtyCount: number;
+};
+
+export type ChatInfo = {
+  chatId: string;
+  cwd: string;
+  git: GitInfo | null;
+  agents: Partial<Record<AgentProvider, AgentInfo>>;
+};
+
+export type ChatsInfoResult = {
+  type: "chats.info.result";
+  info: ChatInfo;
+};
+
 export type ClaudeEvent = {
   type: "claude.event";
   chatId: string;
@@ -150,6 +201,8 @@ export type ServerToClient =
   | ChatsListResult
   | ChatsCreateResult
   | ChatsHistoryResult
+  | ChatsStatusResult
+  | ChatsInfoResult
   | ClaudeEvent
   | ClaudeDone
   | ChatsCancelResult
@@ -167,6 +220,8 @@ export type ChatsCreateMessage = {
   agent?: AgentProvider;
 };
 export type ChatsHistoryMessage = { type: "chats.history"; chatId: string };
+export type ChatsStatusMessage = { type: "chats.status"; chatId: string };
+export type ChatsInfoMessage = { type: "chats.info"; chatId: string };
 export type ChatsSendMessage = {
   type: "chats.send";
   chatId: string;
@@ -195,6 +250,8 @@ export type ClientToServer =
   | ChatsListMessage
   | ChatsCreateMessage
   | ChatsHistoryMessage
+  | ChatsStatusMessage
+  | ChatsInfoMessage
   | ChatsSendMessage
   | ChatsCancelMessage
   | UploadImageMessage

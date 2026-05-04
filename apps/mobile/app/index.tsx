@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   PanResponder,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -16,7 +17,7 @@ import * as ImagePicker from 'expo-image-picker';
 
 import { Pressable, ScrollView, Text, TextInput, View } from '@/tw';
 import { useBridge } from '@/lib/bridge/bridge-provider';
-import type { AgentProvider, Chat } from '@/lib/bridge/types';
+import type { AgentInfo, AgentProvider, Chat, ChatInfo } from '@/lib/bridge/types';
 import Colors from '@/constants/Colors';
 import { parseToolRuns, parseTurnMessages } from '@/lib/bridge/tool-runs';
 import { ToolRunBlock } from '@/components/tool-run-block';
@@ -77,6 +78,319 @@ function isEmptyPlaceholderChat(chat: Chat): boolean {
   return chat.title === 'New conversation' && Object.keys(chat.agentSessions).length === 0;
 }
 
+function connectionLabel(status: string): string {
+  if (status === 'connected') return 'Connected';
+  if (status === 'connecting') return 'Connecting';
+  return 'Disconnected';
+}
+
+function connectionColor(status: string): string {
+  if (status === 'connected') return '#0D9488';
+  if (status === 'connecting') return '#D97706';
+  return '#DC2626';
+}
+
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value < 1000) return String(value);
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 2 : 1)}M`;
+}
+
+function formatCost(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '—';
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatRelativeReset(epochSeconds: number | null): string {
+  if (!epochSeconds) return '';
+  const deltaMs = epochSeconds * 1000 - Date.now();
+  if (deltaMs <= 0) return 'now';
+  const minutes = Math.round(deltaMs / 60_000);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return `in ${days}d`;
+}
+
+function shortSession(id: string | null): string {
+  if (!id) return '—';
+  if (id.length <= 12) return id;
+  return `${id.slice(0, 8)}…${id.slice(-4)}`;
+}
+
+type InfoPalette = {
+  background: string;
+  surface: string;
+  surfaceStrong: string;
+  border: string;
+  text: string;
+  textMuted: string;
+  textSubtle: string;
+};
+
+function InfoRow(props: { label: string; value: string; palette: InfoPalette }) {
+  return (
+    <View style={{ flexDirection: 'row', justifyContent: 'space-between', columnGap: 12, paddingVertical: 4 }}>
+      <Text style={{ color: props.palette.textSubtle, fontSize: 12, fontWeight: '600' }}>{props.label}</Text>
+      <Text
+        numberOfLines={1}
+        style={{
+          color: props.palette.text,
+          fontSize: 12,
+          fontWeight: '600',
+          flexShrink: 1,
+          textAlign: 'right',
+        }}
+      >
+        {props.value}
+      </Text>
+    </View>
+  );
+}
+
+function AgentInfoCard(props: { agent: AgentProvider; info: AgentInfo; palette: InfoPalette }) {
+  const { agent, info, palette } = props;
+  const total = info.tokens.inputTokens + info.tokens.outputTokens;
+  const ctxPercent =
+    info.contextWindow && info.contextWindow > 0
+      ? Math.min(100, Math.round((total / info.contextWindow) * 100))
+      : null;
+
+  return (
+    <View
+      style={{
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: palette.border,
+        backgroundColor: '#FFFFFF',
+        padding: 12,
+        rowGap: 6,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 7, marginBottom: 2 }}>
+        <AgentMark agent={agent} size={14} />
+        <Text style={{ color: palette.text, fontSize: 14, fontWeight: '700' }}>{agentLabel(agent)}</Text>
+        {info.cliVersion ? (
+          <Text style={{ color: palette.textSubtle, fontSize: 11 }}>v{info.cliVersion}</Text>
+        ) : null}
+      </View>
+      {info.model ? <InfoRow label="Model" value={info.model} palette={palette} /> : null}
+      <InfoRow label="Session" value={shortSession(info.sessionId)} palette={palette} />
+      <InfoRow
+        label="Tokens"
+        value={`${formatTokens(info.tokens.inputTokens)} in · ${formatTokens(info.tokens.outputTokens)} out`}
+        palette={palette}
+      />
+      {info.tokens.cacheReadInputTokens > 0 || info.tokens.cacheCreationInputTokens > 0 ? (
+        <InfoRow
+          label="Cache"
+          value={`${formatTokens(info.tokens.cacheReadInputTokens)} read · ${formatTokens(info.tokens.cacheCreationInputTokens)} write`}
+          palette={palette}
+        />
+      ) : null}
+      {info.tokens.reasoningOutputTokens > 0 ? (
+        <InfoRow
+          label="Reasoning"
+          value={formatTokens(info.tokens.reasoningOutputTokens)}
+          palette={palette}
+        />
+      ) : null}
+      {info.contextWindow ? (
+        <InfoRow
+          label="Context"
+          value={
+            ctxPercent !== null
+              ? `${formatTokens(info.contextWindow)} (${ctxPercent}% used)`
+              : formatTokens(info.contextWindow)
+          }
+          palette={palette}
+        />
+      ) : null}
+      {info.costUsd !== null ? <InfoRow label="Cost" value={formatCost(info.costUsd)} palette={palette} /> : null}
+      {info.rateLimits.length > 0
+        ? info.rateLimits.map((limit) => (
+            <InfoRow
+              key={`${limit.label}:${limit.resetsAt ?? ''}`}
+              label={`${limit.label} limit`}
+              value={
+                limit.usedPercent > 0
+                  ? `${limit.usedPercent.toFixed(0)}% · resets ${formatRelativeReset(limit.resetsAt)}`
+                  : `resets ${formatRelativeReset(limit.resetsAt)}`
+              }
+              palette={palette}
+            />
+          ))
+        : null}
+    </View>
+  );
+}
+
+function ChatInfoSheet(props: {
+  visible: boolean;
+  info: ChatInfo | null;
+  palette: InfoPalette;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  if (!props.visible) return null;
+  const { info, palette, onClose, onRefresh } = props;
+  const agentEntries: Array<[AgentProvider, AgentInfo]> = info
+    ? (Object.entries(info.agents).filter(([, value]) => value !== undefined) as Array<[AgentProvider, AgentInfo]>)
+    : [];
+
+  return (
+    <View
+      style={{
+        position: 'absolute',
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+        backgroundColor: 'rgba(0,0,0,0.32)',
+      }}
+    >
+      <Pressable style={{ flex: 1 }} onPress={onClose} />
+      <View
+        style={{
+          position: 'absolute',
+          right: 0,
+          bottom: 0,
+          left: 0,
+          backgroundColor: palette.background,
+          borderTopLeftRadius: 22,
+          borderTopRightRadius: 22,
+          paddingHorizontal: 16,
+          paddingTop: 14,
+          paddingBottom: 28,
+          maxHeight: '82%',
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: -6 },
+          shadowOpacity: 0.18,
+          shadowRadius: 18,
+          elevation: 8,
+        }}
+      >
+        <View
+          style={{
+            alignSelf: 'center',
+            width: 36,
+            height: 4,
+            borderRadius: 999,
+            backgroundColor: palette.surfaceStrong,
+            marginBottom: 10,
+          }}
+        />
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 12,
+          }}
+        >
+          <Text style={{ color: palette.text, fontSize: 17, fontWeight: '700' }}>Session info</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 6 }}>
+            <Pressable
+              onPress={onRefresh}
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 999,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: palette.surface,
+              }}
+            >
+              <Feather name="refresh-cw" size={13} color={palette.textMuted} />
+            </Pressable>
+            <Pressable
+              onPress={onClose}
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 999,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: palette.surface,
+              }}
+            >
+              <FontAwesome name="close" size={14} color={palette.textMuted} />
+            </Pressable>
+          </View>
+        </View>
+        <ScrollView contentContainerStyle={{ paddingBottom: 4, rowGap: 12 }}>
+          {info ? (
+            <View
+              style={{
+                borderRadius: 14,
+                borderWidth: 1,
+                borderColor: palette.border,
+                backgroundColor: '#FFFFFF',
+                padding: 12,
+                rowGap: 4,
+              }}
+            >
+              <Text style={{ color: palette.textSubtle, fontSize: 11, fontWeight: '700', letterSpacing: 0.6 }}>
+                FOLDER
+              </Text>
+              <Text selectable style={{ color: palette.text, fontSize: 13, fontWeight: '600' }}>
+                {info.cwd || 'Unknown'}
+              </Text>
+              {info.git ? (
+                <View style={{ paddingTop: 4, rowGap: 4 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 6 }}>
+                    <Feather name="git-branch" size={12} color={palette.textMuted} />
+                    <Text style={{ color: palette.text, fontSize: 13, fontWeight: '600' }}>
+                      {info.git.branch ?? 'detached'}
+                    </Text>
+                    {info.git.dirtyCount > 0 ? (
+                      <Text style={{ color: '#92400E', fontSize: 11, fontWeight: '700' }}>
+                        {info.git.dirtyCount} changed
+                      </Text>
+                    ) : null}
+                  </View>
+                  {info.git.isWorktree ? (
+                    <Text style={{ color: palette.textMuted, fontSize: 11 }}>
+                      Worktree of {info.git.mainRepoPath ?? 'main repo'}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : (
+                <Text style={{ color: palette.textSubtle, fontSize: 12 }}>Not a git repo</Text>
+              )}
+            </View>
+          ) : (
+            <View
+              style={{
+                borderRadius: 14,
+                borderWidth: 1,
+                borderColor: palette.border,
+                backgroundColor: '#FFFFFF',
+                padding: 16,
+              }}
+            >
+              <Text style={{ color: palette.textMuted, fontSize: 13 }}>Loading session info…</Text>
+            </View>
+          )}
+
+          {agentEntries.map(([agent, agentInfo]) => (
+            <AgentInfoCard key={agent} agent={agent} info={agentInfo} palette={palette} />
+          ))}
+
+          {info && agentEntries.length === 0 ? (
+            <Text style={{ color: palette.textSubtle, fontSize: 12 }}>
+              No agent stats yet — send a message to start tracking.
+            </Text>
+          ) : null}
+        </ScrollView>
+      </View>
+    </View>
+  );
+}
+
 export default function ChatScreen() {
   const bridge = useBridge();
   const drawer = useDrawer();
@@ -95,6 +409,7 @@ export default function ChatScreen() {
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [isInfoOpen, setIsInfoOpen] = useState(false);
   const colors = Colors.light;
   const palette = useMemo(
     () => ({
@@ -1197,6 +1512,25 @@ export default function ChatScreen() {
                 >
                   {agentLabel(activeAgent)}
                 </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 4 }}>
+                  <View
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 999,
+                      backgroundColor: connectionColor(bridge.status),
+                    }}
+                  />
+                  <Text
+                    style={{
+                      color: palette.textSubtle,
+                      fontSize: 11,
+                      fontWeight: '700',
+                    }}
+                  >
+                    {connectionLabel(bridge.status)}
+                  </Text>
+                </View>
               </View>
               <Text
                 numberOfLines={1}
@@ -1208,27 +1542,20 @@ export default function ChatScreen() {
           ),
           headerRight: () => (
             <Pressable
-              disabled={!canConsult}
-              onPress={handleConsult}
+              onPress={() => {
+                Keyboard.dismiss();
+                bridge.refreshActiveChatInfo();
+                setIsInfoOpen(true);
+              }}
               style={{
+                width: 34,
                 height: 34,
                 borderRadius: 999,
-                paddingHorizontal: 12,
                 alignItems: 'center',
                 justifyContent: 'center',
-                backgroundColor: canConsult ? '#FEF3C7' : palette.surface,
               }}
             >
-              <Text
-                numberOfLines={1}
-                style={{
-                  color: canConsult ? '#92400E' : palette.textSubtle,
-                  fontSize: 12,
-                  fontWeight: '700',
-                }}
-              >
-                Ask {agentLabel(consultAgent)}
-              </Text>
+              <Feather name="info" size={20} color={palette.textMuted} />
             </Pressable>
           ),
         }}
@@ -1246,41 +1573,6 @@ export default function ChatScreen() {
           scrollEventThrottle={16}
           onScroll={onScroll}
         >
-          {/* Status pill */}
-          <View style={{ alignItems: 'center', paddingVertical: 12 }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                columnGap: 6,
-                paddingHorizontal: 12,
-                paddingVertical: 4,
-                borderRadius: 999,
-                backgroundColor: palette.surface,
-              }}
-            >
-              <View
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: 999,
-                  backgroundColor: bridge.status === 'connected' ? '#0D9488' : '#A8A29E',
-                }}
-              />
-              <Text
-                style={{
-                  color: palette.textSubtle,
-                  fontSize: 11,
-                  fontWeight: '600',
-                  textTransform: 'uppercase',
-                  letterSpacing: 0.5,
-                }}
-              >
-                {bridge.status}
-              </Text>
-            </View>
-          </View>
-
           {Array.from({ length: turnCount }).map((_, index) => {
             const runs = toolRunsByTurn.get(index) ?? [];
             const turnUser = userByTurn.get(index);
@@ -1465,6 +1757,42 @@ export default function ChatScreen() {
             </View>
           ) : null}
 
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              paddingHorizontal: 4,
+              paddingBottom: 6,
+            }}
+          >
+            <Pressable
+              disabled={!canConsult}
+              onPress={handleConsult}
+              style={{
+                height: 26,
+                borderRadius: 999,
+                paddingHorizontal: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                columnGap: 5,
+                backgroundColor: canConsult ? '#FEF3C7' : palette.surface,
+                opacity: canConsult ? 1 : 0.7,
+              }}
+            >
+              <AgentMark agent={consultAgent} size={11} />
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: canConsult ? '#92400E' : palette.textSubtle,
+                  fontSize: 11,
+                  fontWeight: '700',
+                }}
+              >
+                Ask {agentLabel(consultAgent)}
+              </Text>
+            </Pressable>
+          </View>
+
           <View style={composerContainerStyle}>
             <TextInput
               value={draft}
@@ -1544,6 +1872,13 @@ export default function ChatScreen() {
           </View>
         </View>
       </KeyboardAvoidingView>
+      <ChatInfoSheet
+        visible={isInfoOpen}
+        info={chatId ? bridge.infoByChatId[chatId] ?? null : null}
+        palette={palette}
+        onClose={() => setIsInfoOpen(false)}
+        onRefresh={bridge.refreshActiveChatInfo}
+      />
     </View>
   );
 }

@@ -46,6 +46,46 @@ export type FolderListResult = {
   resumeFolders: ResumeFolder[];
 };
 
+export type AgentTokenStats = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  reasoningOutputTokens: number;
+};
+
+export type AgentRateLimit = {
+  label: string;
+  usedPercent: number;
+  windowMinutes: number;
+  resetsAt: number | null;
+};
+
+export type AgentInfo = {
+  sessionId: string | null;
+  model: string | null;
+  cliVersion: string | null;
+  contextWindow: number | null;
+  costUsd: number | null;
+  tokens: AgentTokenStats;
+  rateLimits: AgentRateLimit[];
+};
+
+export type GitInfo = {
+  branch: string | null;
+  isWorktree: boolean;
+  worktreePath: string | null;
+  mainRepoPath: string | null;
+  dirtyCount: number;
+};
+
+export type ChatInfo = {
+  chatId: string;
+  cwd: string;
+  git: GitInfo | null;
+  agents: Partial<Record<AgentProvider, AgentInfo>>;
+};
+
 export type RelayRole = 'bridge' | 'mobile';
 
 export type RelayRegisteredMessage = {
@@ -95,6 +135,8 @@ export type ClientToServer =
   | { type: 'chats.list'; projectId?: string }
   | { type: 'chats.create'; projectId: string; title: string; agent?: AgentProvider }
   | { type: 'chats.history'; chatId: string }
+  | { type: 'chats.status'; chatId: string }
+  | { type: 'chats.info'; chatId: string }
   | {
       type: 'chats.send';
       chatId: string;
@@ -113,6 +155,8 @@ export type ServerToClient =
   | { type: 'chats.list.result'; chats: Chat[] }
   | { type: 'chats.create.result'; chat: Chat }
   | { type: 'chats.history.result'; chatId: string; messages: ChatMessage[]; events: unknown[] }
+  | { type: 'chats.status.result'; chatId: string; responding: boolean }
+  | { type: 'chats.info.result'; info: ChatInfo }
   | { type: 'claude.event'; chatId: string; event: unknown }
   | { type: 'claude.done'; chatId: string; exitCode: number | null; signal: string | null }
   | { type: 'chats.cancel.result'; chatId: string; accepted: boolean }

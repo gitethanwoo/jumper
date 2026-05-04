@@ -5,6 +5,7 @@ import type {
   AgentProvider,
   Chat,
   ChatAttachment,
+  ChatInfo,
   FolderListResult,
   ChatMessage,
   ClientToServer,
@@ -34,6 +35,7 @@ type BridgeState = {
   eventsByChatId: Record<string, unknown[]>;
   isRespondingByChatId: Record<string, boolean>;
   isStoppingByChatId: Record<string, boolean>;
+  infoByChatId: Record<string, ChatInfo>;
   activeAgent: AgentProvider;
 
   setServerUrl: (url: string) => Promise<void>;
@@ -56,6 +58,7 @@ type BridgeState = {
   consultActiveChat: (agent: AgentProvider, text: string) => void;
   interruptActiveChat: () => boolean;
   cancelActiveChat: () => boolean;
+  refreshActiveChatInfo: () => void;
 };
 
 const BridgeContext = React.createContext<BridgeState | null>(null);
@@ -88,6 +91,7 @@ type ReconnectTarget = {
 type BridgeInbound = ServerToClient | RelayControlMessage;
 
 const RELAY_WS_BASE_URL = 'wss://relay.jumper.sh/ws/mobile';
+const RECONNECT_DELAYS_MS = [750, 1500, 3000, 5000] as const;
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
@@ -240,6 +244,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const [eventsByChatId, setEventsByChatId] = useState<Record<string, unknown[]>>({});
   const [isRespondingByChatId, setIsRespondingByChatId] = useState<Record<string, boolean>>({});
   const [isStoppingByChatId, setIsStoppingByChatId] = useState<Record<string, boolean>>({});
+  const [infoByChatId, setInfoByChatId] = useState<Record<string, ChatInfo>>({});
   const activeChat = allChats.find((chat) => chat.id === activeChatId) ?? null;
   const activeAgent = activeChat?.activeAgent ?? 'claude';
 
@@ -255,6 +260,10 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const statusRef = useRef<Status>('disconnected');
   const serverUrlRef = useRef('ws://localhost:8787/ws');
   const connectionModeRef = useRef<ConnectionMode>('direct');
+  const activeChatIdRef = useRef<string | null>(null);
+  const shouldReconnectRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     statusRef.current = status;
@@ -268,9 +277,20 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     connectionModeRef.current = connectionModeState;
   }, [connectionModeState]);
 
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+  }, [activeChatId]);
+
   const setConnectionMode = (mode: ConnectionMode) => {
     setConnectionModeState(mode);
     connectionModeRef.current = mode;
+  };
+
+  const clearReconnectTimer = () => {
+    const timer = reconnectTimerRef.current;
+    if (!timer) return;
+    clearTimeout(timer);
+    reconnectTimerRef.current = null;
   };
 
   const persistServerUrl = async (url: string) => {
@@ -291,6 +311,12 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const requestInitialData = () => {
     sendOrQueue({ type: 'projects.list' });
     sendOrQueue({ type: 'chats.list' });
+    const chatId = activeChatIdRef.current;
+    if (chatId) {
+      sendOrQueue({ type: 'chats.history', chatId });
+      sendOrQueue({ type: 'chats.status', chatId });
+      sendOrQueue({ type: 'chats.info', chatId });
+    }
   };
 
   const resolvePendingPair = () => {
@@ -354,14 +380,28 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
         const withoutExisting = prev.filter((entry) => entry.id !== chat.id);
         return [...withoutExisting, chat];
       });
+      activeChatIdRef.current = msg.chat.id;
       setActiveChatId(msg.chat.id);
       sendOrQueue({ type: 'chats.history', chatId: msg.chat.id });
+      sendOrQueue({ type: 'chats.status', chatId: msg.chat.id });
+      sendOrQueue({ type: 'chats.info', chatId: msg.chat.id });
       return;
     }
 
     if (msg.type === 'chats.history.result') {
       setMessagesByChatId((prev) => ({ ...prev, [msg.chatId]: msg.messages }));
       setEventsByChatId((prev) => ({ ...prev, [msg.chatId]: msg.events }));
+      return;
+    }
+
+    if (msg.type === 'chats.status.result') {
+      setIsRespondingByChatId((prev) => ({ ...prev, [msg.chatId]: msg.responding }));
+      setIsStoppingByChatId((prev) => ({ ...prev, [msg.chatId]: false }));
+      return;
+    }
+
+    if (msg.type === 'chats.info.result') {
+      setInfoByChatId((prev) => ({ ...prev, [msg.info.chatId]: msg.info }));
       return;
     }
 
@@ -402,6 +442,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
         })
       );
       sendOrQueue({ type: 'chats.list' });
+      sendOrQueue({ type: 'chats.info', chatId: msg.chatId });
       return;
     }
 
@@ -492,6 +533,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   const startConnection = (target: ReconnectTarget) => {
     if (statusRef.current !== 'disconnected') return;
 
+    clearReconnectTimer();
     setConnectionMode(target.mode);
     setPeerConnected(false);
     setStatus('connecting');
@@ -501,6 +543,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      reconnectAttemptRef.current = 0;
       setStatus('connected');
       statusRef.current = 'connected';
 
@@ -528,6 +571,8 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       setStatus('disconnected');
       statusRef.current = 'disconnected';
       setPeerConnected(false);
+      setIsRespondingByChatId({});
+      setIsStoppingByChatId({});
       rejectPendingUploads('Connection closed');
       rejectPendingFolderLists('Connection closed');
 
@@ -536,6 +581,23 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
         pendingReconnectRef.current = null;
         startConnection(reconnectTarget);
         return;
+      }
+
+      if (shouldReconnectRef.current) {
+        const attempt = reconnectAttemptRef.current;
+        const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+        reconnectAttemptRef.current = attempt + 1;
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          if (!shouldReconnectRef.current || statusRef.current !== 'disconnected') return;
+          if (connectionModeRef.current === 'relay') {
+            const session = relaySessionRef.current;
+            if (!session) return;
+            startConnection({ mode: 'relay', url: relayUrlFromSession(session) });
+            return;
+          }
+          startConnection({ mode: 'direct', url: serverUrlRef.current });
+        }, delay);
       }
 
       rejectPendingPair('Pairing connection closed');
@@ -547,6 +609,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   };
 
   const connectOrReconnect = (target: ReconnectTarget) => {
+    shouldReconnectRef.current = true;
     if (statusRef.current === 'disconnected') {
       startConnection(target);
       return;
@@ -583,8 +646,11 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
 
   const selectChat = (chatId: string) => {
     hapticTap();
+    activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
     sendOrQueue({ type: 'chats.history', chatId });
+    sendOrQueue({ type: 'chats.status', chatId });
+    sendOrQueue({ type: 'chats.info', chatId });
   };
 
   const deselectChat = () => {
@@ -595,6 +661,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
         prev.filter((chat) => chat.id !== chatId || !isEmptyPlaceholderChat(chat))
       );
     }
+    activeChatIdRef.current = null;
     setActiveChatId(null);
   };
 
@@ -651,6 +718,8 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     await RelayStore.clearRelaySession();
     relaySessionRef.current = null;
     setPeerConnected(false);
+    shouldReconnectRef.current = false;
+    clearReconnectTimer();
 
     if (connectionModeRef.current !== 'relay') return;
 
@@ -795,6 +864,12 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
     });
   };
 
+  const refreshActiveChatInfo = () => {
+    const chatId = activeChatIdRef.current;
+    if (!chatId) return;
+    sendOrQueue({ type: 'chats.info', chatId });
+  };
+
   const interruptActiveChat = () => {
     const chatId = activeChatId;
     if (!chatId) throw new Error('No active chat');
@@ -837,6 +912,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
   useEffect(() => {
     if (!initialized || autoConnectAttemptedRef.current) return;
     autoConnectAttemptedRef.current = true;
+    shouldReconnectRef.current = true;
 
     const relaySession = relaySessionRef.current;
     if (relaySession) {
@@ -860,6 +936,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       eventsByChatId,
       isRespondingByChatId,
       isStoppingByChatId,
+      infoByChatId,
       activeAgent,
 
       setServerUrl: async (url: string) => {
@@ -878,6 +955,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       consultActiveChat,
       interruptActiveChat,
       cancelActiveChat,
+      refreshActiveChatInfo,
     }),
     [
       status,
@@ -891,6 +969,7 @@ export function BridgeProvider(props: { children: React.ReactNode }) {
       eventsByChatId,
       isRespondingByChatId,
       isStoppingByChatId,
+      infoByChatId,
       activeAgent,
       handleConnectLink,
       pairWithCode,

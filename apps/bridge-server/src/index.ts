@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import crypto from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -8,15 +9,19 @@ import path from "node:path";
 import readline from "node:readline";
 
 import QRCode from "qrcode";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 import { RelayClient } from "./relay-client.js";
 import { loadRelaySession, nowIso, loadState, saveRelaySession, saveState } from "./state.js";
 import type {
+  AgentInfo,
   AgentProvider,
+  AgentRateLimit,
   Chat,
   ChatAttachment,
+  ChatInfo,
   ClientToServer,
+  GitInfo,
   KeyboardConversationContext,
   KeyboardConversationEntry,
   KeyboardRespondRequest,
@@ -33,6 +38,7 @@ const PROJECTS_ROOT =
   process.env.PROJECTS_ROOT ?? path.join(os.homedir(), "dev", "jumper-projects");
 const CLAUDE_HISTORY_PATH = path.join(os.homedir(), ".claude", "history.jsonl");
 const CLAUDE_PROJECTS_PATH = path.join(os.homedir(), ".claude", "projects");
+const CODEX_SESSIONS_PATH = path.join(os.homedir(), ".codex", "sessions");
 const AGENT_PROVIDER = process.env.JUMPER_AGENT === "codex" ? "codex" : "claude";
 const CLAUDE_COMMAND =
   process.env.CLAUDE_COMMAND ??
@@ -513,7 +519,305 @@ async function loadClaudeHistory(projectPath: string, sessionId: string): Promis
   return { messages, events };
 }
 
+async function findCodexHistoryFileBySessionId(sessionId: string): Promise<string | null> {
+  if (!existsSync(CODEX_SESSIONS_PATH)) return null;
+  const years = await fs.readdir(CODEX_SESSIONS_PATH, { withFileTypes: true });
+  for (const year of years) {
+    if (!year.isDirectory()) continue;
+    const yearPath = path.join(CODEX_SESSIONS_PATH, year.name);
+    const months = await fs.readdir(yearPath, { withFileTypes: true });
+    for (const month of months) {
+      if (!month.isDirectory()) continue;
+      const monthPath = path.join(yearPath, month.name);
+      const days = await fs.readdir(monthPath, { withFileTypes: true });
+      for (const day of days) {
+        if (!day.isDirectory()) continue;
+        const dayPath = path.join(monthPath, day.name);
+        const entries = await fs.readdir(dayPath, { withFileTypes: true });
+        const match = entries.find((entry) => entry.isFile() && entry.name.endsWith(`${sessionId}.jsonl`));
+        if (match) return path.join(dayPath, match.name);
+      }
+    }
+  }
+  return null;
+}
+
+function textFromCodexContent(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!isObject(item)) continue;
+    if (typeof item.text === "string") parts.push(item.text);
+  }
+  return parts.length > 0 ? parts.join("") : null;
+}
+
+function codexMessageFromPayload(payload: unknown, index: number): ChatHistoryMessage | null {
+  if (!isObject(payload)) return null;
+  if (payload.type !== "message") return null;
+  const role = payload.role;
+  if (role !== "user" && role !== "assistant") return null;
+  const text = textFromCodexContent(payload.content);
+  if (!text) return null;
+  return { id: `codex-${role}:${index}`, role, text };
+}
+
+function codexEventMessageFromPayload(payload: unknown, index: number): ChatHistoryMessage | null {
+  if (!isObject(payload)) return null;
+  if (payload.type === "user_message" && typeof payload.message === "string") {
+    return { id: `codex-user-event:${index}`, role: "user", text: payload.message };
+  }
+  if (payload.type === "agent_message" && typeof payload.message === "string") {
+    return { id: `codex-agent-event:${index}`, role: "assistant", text: payload.message };
+  }
+  return null;
+}
+
+async function loadCodexHistory(sessionId: string): Promise<{
+  messages: ChatHistoryMessage[];
+  events: unknown[];
+}> {
+  const filePath = await findCodexHistoryFileBySessionId(sessionId);
+  if (!filePath) return { messages: [], events: [] };
+  const raw = await fs.readFile(filePath, "utf8");
+  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+  const messages: ChatHistoryMessage[] = [];
+  const events: unknown[] = [];
+
+  lines.forEach((line, index) => {
+    const entry: unknown = JSON.parse(line);
+    if (!isObject(entry)) return;
+    events.push(entry);
+    const payload = entry.payload;
+    const message =
+      entry.type === "response_item"
+        ? codexMessageFromPayload(payload, index)
+        : codexEventMessageFromPayload(payload, index);
+    if (message) messages.push(message);
+  });
+
+  return { messages, events };
+}
+
+async function loadAgentHistory(
+  agent: AgentProvider,
+  projectPath: string,
+  sessionId: string
+): Promise<{ messages: ChatHistoryMessage[]; events: unknown[] }> {
+  return agent === "codex" ? loadCodexHistory(sessionId) : loadClaudeHistory(projectPath, sessionId);
+}
+
+const execFileAsync = promisify(execFile);
+
+function emptyTokens(): AgentInfo["tokens"] {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    reasoningOutputTokens: 0,
+  };
+}
+
+function emptyAgentInfo(): AgentInfo {
+  return {
+    sessionId: null,
+    model: null,
+    cliVersion: null,
+    contextWindow: null,
+    costUsd: null,
+    tokens: emptyTokens(),
+    rateLimits: [],
+  };
+}
+
+function numberFrom(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return 0;
+}
+
+function applyClaudeEventToInfo(info: AgentInfo, event: unknown): void {
+  if (!isObject(event)) return;
+
+  if (event.type === "system" && event.subtype === "init") {
+    if (typeof event.session_id === "string") info.sessionId = event.session_id;
+    if (typeof event.model === "string") info.model = event.model;
+    if (typeof event.claude_code_version === "string") info.cliVersion = event.claude_code_version;
+    return;
+  }
+
+  if (event.type === "rate_limit_event" && isObject(event.rate_limit_info)) {
+    const rate = event.rate_limit_info;
+    const label = typeof rate.rateLimitType === "string" ? rate.rateLimitType : "rate_limit";
+    const resetsAt = typeof rate.resetsAt === "number" ? rate.resetsAt : null;
+    info.rateLimits = [
+      {
+        label,
+        usedPercent: 0,
+        windowMinutes: 0,
+        resetsAt,
+      },
+    ];
+    return;
+  }
+
+  if (event.type === "result" && isObject(event.usage)) {
+    const usage = event.usage;
+    info.tokens.inputTokens += numberFrom(usage.input_tokens);
+    info.tokens.outputTokens += numberFrom(usage.output_tokens);
+    info.tokens.cacheCreationInputTokens += numberFrom(usage.cache_creation_input_tokens);
+    info.tokens.cacheReadInputTokens += numberFrom(usage.cache_read_input_tokens);
+    if (typeof event.total_cost_usd === "number") {
+      info.costUsd = (info.costUsd ?? 0) + event.total_cost_usd;
+    }
+    if (isObject(event.modelUsage)) {
+      let largestContext = info.contextWindow ?? 0;
+      let primaryModel: string | null = null;
+      let primaryModelTokens = -1;
+      for (const [modelName, modelUsage] of Object.entries(event.modelUsage)) {
+        if (!isObject(modelUsage)) continue;
+        const ctx = numberFrom(modelUsage.contextWindow);
+        if (ctx > largestContext) largestContext = ctx;
+        const used = numberFrom(modelUsage.inputTokens) + numberFrom(modelUsage.outputTokens);
+        if (used > primaryModelTokens) {
+          primaryModelTokens = used;
+          primaryModel = modelName;
+        }
+      }
+      if (largestContext > 0) info.contextWindow = largestContext;
+      if (primaryModel) info.model = primaryModel;
+    }
+  }
+}
+
+function applyCodexEventToInfo(info: AgentInfo, event: unknown): void {
+  if (!isObject(event)) return;
+
+  if (event.type === "thread.started" && typeof event.thread_id === "string") {
+    info.sessionId = event.thread_id;
+    return;
+  }
+
+  if (event.type === "turn.completed" && isObject(event.usage)) {
+    const usage = event.usage;
+    info.tokens.inputTokens += numberFrom(usage.input_tokens);
+    info.tokens.outputTokens += numberFrom(usage.output_tokens);
+    info.tokens.cacheReadInputTokens += numberFrom(usage.cached_input_tokens);
+    info.tokens.reasoningOutputTokens += numberFrom(usage.reasoning_output_tokens);
+  }
+}
+
+function applyAgentEventToInfo(agent: AgentProvider, info: AgentInfo, event: unknown): void {
+  if (agent === "codex") {
+    applyCodexEventToInfo(info, event);
+    return;
+  }
+  applyClaudeEventToInfo(info, event);
+}
+
+function rateLimitsFromCodexInfo(rateLimits: unknown): AgentRateLimit[] {
+  if (!isObject(rateLimits)) return [];
+  const entries: AgentRateLimit[] = [];
+  for (const [key, value] of Object.entries(rateLimits)) {
+    if (key !== "primary" && key !== "secondary") continue;
+    if (!isObject(value)) continue;
+    const usedPercent = numberFrom(value.used_percent);
+    const windowMinutes = numberFrom(value.window_minutes);
+    const resetsAt = typeof value.resets_at === "number" ? value.resets_at : null;
+    entries.push({ label: key, usedPercent, windowMinutes, resetsAt });
+  }
+  return entries;
+}
+
+async function enrichCodexInfoFromRollout(info: AgentInfo): Promise<void> {
+  if (!info.sessionId) return;
+  const filePath = await findCodexHistoryFileBySessionId(info.sessionId);
+  if (!filePath) return;
+  const raw = await fs.readFile(filePath, "utf8");
+  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+
+  let lastTokenCount: Record<string, unknown> | null = null;
+  let lastRateLimits: unknown = null;
+
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isObject(parsed)) continue;
+
+    if (parsed.type === "session_meta" && isObject(parsed.payload)) {
+      if (typeof parsed.payload.cli_version === "string") info.cliVersion = parsed.payload.cli_version;
+      if (typeof parsed.payload.model === "string") info.model = parsed.payload.model;
+    }
+
+    if (parsed.type === "event_msg" && isObject(parsed.payload) && parsed.payload.type === "token_count") {
+      if (isObject(parsed.payload.info)) lastTokenCount = parsed.payload.info as Record<string, unknown>;
+      if (parsed.payload.rate_limits !== undefined) lastRateLimits = parsed.payload.rate_limits;
+    }
+
+    if (parsed.type === "turn_context" && isObject(parsed.payload)) {
+      if (typeof parsed.payload.model === "string") info.model = parsed.payload.model;
+    }
+  }
+
+  if (lastTokenCount) {
+    if (typeof lastTokenCount.model_context_window === "number") {
+      info.contextWindow = lastTokenCount.model_context_window;
+    }
+    if (isObject(lastTokenCount.total_token_usage)) {
+      const total = lastTokenCount.total_token_usage as Record<string, unknown>;
+      info.tokens.inputTokens = numberFrom(total.input_tokens);
+      info.tokens.outputTokens = numberFrom(total.output_tokens);
+      info.tokens.cacheReadInputTokens = numberFrom(total.cached_input_tokens);
+      info.tokens.reasoningOutputTokens = numberFrom(total.reasoning_output_tokens);
+    }
+  }
+
+  if (lastRateLimits) {
+    info.rateLimits = rateLimitsFromCodexInfo(lastRateLimits);
+  }
+}
+
+async function gitInfoForPath(projectPath: string): Promise<GitInfo | null> {
+  const env = process.env;
+  const run = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileAsync("git", ["-C", projectPath, ...args], { env });
+      return stdout.toString().trim();
+    } catch {
+      return null;
+    }
+  };
+
+  const branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (branch === null) return null;
+
+  const [topLevel, gitDir, commonDir, statusOut] = await Promise.all([
+    run(["rev-parse", "--show-toplevel"]),
+    run(["rev-parse", "--absolute-git-dir"]),
+    run(["rev-parse", "--git-common-dir"]),
+    run(["status", "--short"]),
+  ]);
+
+  const dirtyCount = statusOut ? statusOut.split("\n").filter((line) => line.length > 0).length : 0;
+  const isWorktree = Boolean(gitDir && commonDir && path.resolve(gitDir) !== path.resolve(commonDir));
+  const mainRepoPath = isWorktree && commonDir ? path.dirname(path.resolve(commonDir)) : null;
+
+  return {
+    branch: branch === "HEAD" ? null : branch,
+    isWorktree,
+    worktreePath: topLevel,
+    mainRepoPath,
+    dirtyCount,
+  };
+}
+
 function send(ws: WebSocket, msg: ServerToClient): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify(msg));
 }
 
@@ -1035,6 +1339,47 @@ async function main() {
 
   const active = new Map<string, ReturnType<typeof spawn>>();
   const cancelTimers = new Map<string, NodeJS.Timeout>();
+  const agentInfoByChatId = new Map<string, Partial<Record<AgentProvider, AgentInfo>>>();
+
+  const ensureAgentInfo = (chatId: string, agent: AgentProvider): AgentInfo => {
+    let perChat = agentInfoByChatId.get(chatId);
+    if (!perChat) {
+      perChat = {};
+      agentInfoByChatId.set(chatId, perChat);
+    }
+    let agentInfo = perChat[agent];
+    if (!agentInfo) {
+      agentInfo = emptyAgentInfo();
+      perChat[agent] = agentInfo;
+    }
+    return agentInfo;
+  };
+
+  const buildChatInfo = async (chatId: string): Promise<ChatInfo | null> => {
+    const chat = state.chats.find((c) => c.id === chatId);
+    if (!chat) return null;
+    const project = state.projects.find((p) => p.id === chat.projectId);
+    const projectPath = project ? normalizeProjectPath(project.path) : "";
+    const normalizedChat = normalizeChat(chat);
+    const stored = agentInfoByChatId.get(chatId) ?? {};
+    const agents: Partial<Record<AgentProvider, AgentInfo>> = {};
+
+    for (const agent of ["claude", "codex"] as AgentProvider[]) {
+      const sessionId = chatSessionId(normalizedChat, agent);
+      const info = stored[agent];
+      if (!sessionId && !info) continue;
+      const merged: AgentInfo = info ? { ...info, tokens: { ...info.tokens } } : emptyAgentInfo();
+      if (sessionId) merged.sessionId = sessionId;
+      if (agent === "codex" && merged.sessionId) {
+        await enrichCodexInfoFromRollout(merged);
+      }
+      agents[agent] = merged;
+    }
+
+    const git = projectPath ? await gitInfoForPath(projectPath) : null;
+
+    return { chatId, cwd: projectPath, git, agents };
+  };
 
   let state: State = await loadState();
   state = await normalizeStateProjectPaths(state);
@@ -1107,13 +1452,24 @@ async function main() {
       if (!project) throw new Error("Unknown project");
 
       const projectPath = normalizeProjectPath(project.path);
-      const history = await loadClaudeHistory(projectPath, activeSessionId);
+      const history = await loadAgentHistory(normalizedChat.activeAgent, projectPath, activeSessionId);
       reply({
         type: "chats.history.result",
         chatId: chat.id,
         messages: history.messages,
         events: history.events,
       });
+      return;
+    }
+
+    if (msg.type === "chats.status") {
+      reply({ type: "chats.status.result", chatId: msg.chatId, responding: active.has(msg.chatId) });
+      return;
+    }
+
+    if (msg.type === "chats.info") {
+      const info = await buildChatInfo(msg.chatId);
+      if (info) reply({ type: "chats.info.result", info });
       return;
     }
 
@@ -1230,6 +1586,9 @@ async function main() {
         const event: unknown = JSON.parse(line);
         reply({ type: "claude.event", chatId: chat.id, event });
 
+        const agentInfo = ensureAgentInfo(chat.id, targetAgent);
+        applyAgentEventToInfo(targetAgent, agentInfo, event);
+
         const saveAgentSession = async (sessionId: string) => {
           const idx = state.chats.findIndex((c) => c.id === chat.id);
           if (idx === -1) return;
@@ -1276,6 +1635,9 @@ async function main() {
         rlOut.close();
         rlErr.close();
         reply({ type: "claude.done", chatId: chat.id, exitCode, signal });
+        void buildChatInfo(chat.id).then((info) => {
+          if (info) reply({ type: "chats.info.result", info });
+        });
       });
       child.on("error", (error) => {
         active.delete(chat.id);
