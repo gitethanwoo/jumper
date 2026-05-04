@@ -28,6 +28,17 @@ function statusColor(status: ToolStatus, palette: { running: string; success: st
   return palette.running;
 }
 
+function isShellTool(tool: ToolCall): boolean {
+  return tool.name === 'Bash' || tool.name === 'Shell';
+}
+
+function shellCommandPreview(tool: ToolCall): string {
+  const raw = tool.inputSummary?.trim() ?? '';
+  if (!raw) return tool.name;
+  const collapsed = raw.replace(/\s+/g, ' ');
+  return truncate(collapsed, 80);
+}
+
 function runSummary(tools: ToolCall[]): {
   title: string;
   subtitle: string;
@@ -93,6 +104,8 @@ export function ToolRunBlock(props: Props) {
       ),
     [props.run.tools, taskAgentBuild]
   );
+  const shellTools = React.useMemo(() => rootTools.filter(isShellTool), [rootTools]);
+  const summaryTools = React.useMemo(() => rootTools.filter((tool) => !isShellTool(tool)), [rootTools]);
 
   const palette = React.useMemo(
     () => ({
@@ -111,11 +124,81 @@ export function ToolRunBlock(props: Props) {
 
   if (props.run.tools.length === 0) return null;
 
-  const toolsSummary = rootTools.length > 0 ? runSummary(rootTools) : null;
+  const toolsSummary = summaryTools.length > 0 ? runSummary(summaryTools) : null;
 
   return (
     <View style={{ rowGap: 8 }}>
       <TaskAgentSwarm taskAgents={taskAgents} palette={palette} />
+
+      {shellTools.length > 0 ? (
+        <View style={{ rowGap: 6 }}>
+          {shellTools.map((tool) => {
+            const isToolExpanded = expandedToolId === tool.id;
+            const preview = shellCommandPreview(tool);
+            return (
+              <View key={tool.id} style={{ rowGap: 4 }}>
+                <Pressable
+                  onPress={() => {
+                    setExpandedToolId((current) => (current === tool.id ? null : tool.id));
+                  }}
+                  style={{ flexDirection: 'row', alignItems: 'center', columnGap: 8 }}
+                >
+                  {tool.status === 'running' ? (
+                    <ActivityIndicator size="small" color={palette.running} />
+                  ) : (
+                    <View
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 999,
+                        backgroundColor: statusColor(tool.status, palette),
+                      }}
+                    />
+                  )}
+                  <Text style={{ color: palette.textSubtle, fontFamily: 'Menlo', fontSize: 13 }}>$</Text>
+                  <Text
+                    numberOfLines={1}
+                    selectable
+                    style={{
+                      color: palette.text,
+                      fontFamily: 'Menlo',
+                      fontSize: 13,
+                      flex: 1,
+                    }}
+                  >
+                    {preview}
+                  </Text>
+                  <FontAwesome
+                    name={isToolExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={11}
+                    color={palette.textSubtle}
+                  />
+                </Pressable>
+                {isToolExpanded ? (
+                  <View
+                    style={{
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      borderColor: palette.border,
+                      backgroundColor: '#FCFCFB',
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      marginLeft: 16,
+                    }}
+                  >
+                    <Text
+                      selectable
+                      style={{ color: palette.textMuted, fontSize: 12, lineHeight: 18, fontFamily: 'Menlo' }}
+                    >
+                      {tool.output ? truncate(tool.output, 2400) : 'No output yet'}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
 
       {toolsSummary ? (
         <View
@@ -178,7 +261,7 @@ export function ToolRunBlock(props: Props) {
           {/* Layer 2: expanded stack of root tools */}
           {isRunExpanded ? (
             <View style={{ rowGap: 8 }}>
-              {rootTools.map((tool, index) => {
+              {summaryTools.map((tool, index) => {
                 const isToolExpanded = expandedToolId === tool.id;
                 return (
                   <View
